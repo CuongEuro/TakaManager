@@ -361,76 +361,36 @@ export default function DashboardPage() {
             </Card>
           </div>
 
-          {/* Attribution — đơn theo kênh + doanh thu theo catalog (cho tối ưu Ads) */}
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Card>
-              <div className="mb-3 text-sm font-semibold text-slate-700">
-                Đơn theo kênh (traffic source)
-              </div>
-              {data && data.channels.length === 0 ? (
-                <EmptyState message="Chưa có dữ liệu attribution — sẽ có sau khi sync Shopify (UTM)." />
-              ) : (
-                <div className="space-y-2.5">
-                  {data?.channels.map((c) => (
-                    <div key={c.channel}>
-                      <div className="mb-0.5 flex items-center justify-between text-sm">
-                        <span className="font-medium text-slate-700">
-                          {ORDER_CHANNEL_LABELS[c.channel] ?? c.channel}
-                        </span>
-                        <span className="text-slate-500">
-                          {formatNumber(c.orders)} đơn · {formatJPY(c.revenue)}
-                        </span>
-                      </div>
-                      <div className="h-2 w-full rounded bg-slate-100">
-                        <div
-                          className="h-2 rounded bg-brand-500"
-                          style={{ width: `${(c.revenue / channelMax) * 100}%` }}
-                        />
-                      </div>
+          {/* Attribution — đơn theo kênh (cho tối ưu Ads) */}
+          <Card>
+            <div className="mb-3 text-sm font-semibold text-slate-700">
+              Đơn theo kênh (traffic source)
+            </div>
+            {data && data.channels.length === 0 ? (
+              <EmptyState message="Chưa có dữ liệu attribution — sẽ có sau khi sync Shopify (UTM)." />
+            ) : (
+              <div className="space-y-2.5">
+                {data?.channels.map((c) => (
+                  <div key={c.channel}>
+                    <div className="mb-0.5 flex items-center justify-between text-sm">
+                      <span className="font-medium text-slate-700">
+                        {ORDER_CHANNEL_LABELS[c.channel] ?? c.channel}
+                      </span>
+                      <span className="text-slate-500">
+                        {formatNumber(c.orders)} đơn · {formatJPY(c.revenue)}
+                      </span>
                     </div>
-                  ))}
-                </div>
-              )}
-            </Card>
-
-            <Card>
-              <div className="mb-3 text-sm font-semibold text-slate-700">
-                Doanh thu theo catalog
+                    <div className="h-2 w-full rounded bg-slate-100">
+                      <div
+                        className="h-2 rounded bg-brand-500"
+                        style={{ width: `${(c.revenue / channelMax) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
-              {data && data.catalogs.length === 0 ? (
-                <EmptyState message="Chưa có catalog — sẽ có khi sync sản phẩm (collection)." />
-              ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-xs uppercase text-slate-400">
-                      <th className="py-1 text-left">Catalog</th>
-                      <th className="py-1 text-right">Đơn</th>
-                      <th className="py-1 text-right">SL</th>
-                      <th className="py-1 text-right">Doanh thu</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data?.catalogs.map((c) => (
-                      <tr key={c.catalog} className="border-t border-slate-100">
-                        <td className="py-1.5 font-medium text-slate-700">
-                          {c.catalog}
-                        </td>
-                        <td className="py-1.5 text-right">
-                          {formatNumber(c.orders)}
-                        </td>
-                        <td className="py-1.5 text-right">
-                          {formatNumber(c.units)}
-                        </td>
-                        <td className="py-1.5 text-right font-semibold">
-                          {formatJPY(c.revenue)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </Card>
-          </div>
+            )}
+          </Card>
         </div>
       )}
     </div>

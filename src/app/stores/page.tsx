@@ -86,7 +86,15 @@ async function runSyncStream(
       }
     }
   }
-  return results ?? [];
+  // Stream closed without a result line → the server was likely cut off
+  // (serverless time limit). Tell the user to pick a shorter range.
+  if (results === null) {
+    throw new Error(
+      "Đồng bộ bị gián đoạn (có thể quá thời gian xử lý trên server). " +
+        "Hãy thử khoảng ngày ngắn hơn (1–7 ngày)."
+    );
+  }
+  return results;
 }
 
 interface Store {
@@ -118,23 +126,21 @@ export default function StoresPage() {
     null
   );
   const [progress, setProgress] = useState<ProgressState | null>(null);
-  // Khoảng ngày kéo dữ liệu (đến hôm nay): preset số ngày, "custom", hoặc "all".
-  const [rangeMode, setRangeMode] = useState("60");
+  // Khoảng ngày kéo dữ liệu (đến hôm nay): preset số ngày hoặc "custom".
+  const [rangeMode, setRangeMode] = useState("7");
   const [customDate, setCustomDate] = useState("");
 
   function sincePayload(): Record<string, unknown> {
-    if (rangeMode === "all") return { sinceDays: 3650 };
     if (rangeMode === "custom")
       return customDate
         ? { since: new Date(customDate + "T00:00:00").toISOString() }
-        : { sinceDays: 60 };
+        : { sinceDays: 7 };
     return { sinceDays: Number(rangeMode) };
   }
 
   function rangeLabel(): string {
-    if (rangeMode === "all") return "toàn bộ lịch sử";
     if (rangeMode === "custom")
-      return customDate ? `từ ${fmtDate(customDate)} đến hôm nay` : "60 ngày qua";
+      return customDate ? `từ ${fmtDate(customDate)} đến hôm nay` : "7 ngày qua";
     return `${rangeMode} ngày qua`;
   }
 
@@ -279,12 +285,12 @@ export default function StoresPage() {
                   onChange={(e) => setRangeMode(e.target.value)}
                   disabled={!!busy}
                 >
+                  <option value="1">1 ngày (hôm nay)</option>
+                  <option value="3">3 ngày qua</option>
                   <option value="7">7 ngày qua</option>
                   <option value="30">30 ngày qua</option>
                   <option value="60">60 ngày qua</option>
-                  <option value="90">90 ngày qua</option>
                   <option value="custom">Từ ngày cụ thể…</option>
-                  <option value="all">Toàn bộ lịch sử</option>
                 </Select>
               </Field>
             </div>
@@ -392,8 +398,13 @@ export default function StoresPage() {
           </p>
           <p>
             ⚙️ Trong app, cấp <b>Admin API scopes</b>: <code>read_orders</code>,{" "}
-            <code>read_products</code>, <code>read_inventory</code>, rồi{" "}
+            <code>read_products</code> (KHÔNG cần <code>read_inventory</code>), rồi{" "}
             <b>cài (install) app lên đúng store</b> (app & store phải cùng tổ chức).
+          </p>
+          <p>
+            📦 Hệ thống chỉ lấy <b>tiêu đề + 1 ảnh</b> của sản phẩm từ các đơn trong
+            khoảng ngày đã chọn (không kéo toàn bộ catalog) → nhanh & nhẹ. Giá vốn
+            (COGS) khai ở mục <b>Biến đổi A</b>.
           </p>
           <p>
             🔒 Muốn biết đơn đến từ kênh nào (Facebook/Google/Klaviyo...), bật thêm{" "}

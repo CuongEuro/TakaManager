@@ -18,14 +18,6 @@ export interface ShopifyCreds {
   shopifyApiVersion?: string;
 }
 
-export interface ShopifyProductNorm {
-  externalId: string;
-  title: string;
-  image: string | null;
-  catalog: string | null; // main collection title
-  baseCost: number; // unit cost from InventoryItem (used as COGS)
-}
-
 export interface ShopifyOrderLineNorm {
   externalProductId: string | null;
   title: string;
@@ -161,64 +153,9 @@ export async function testConnection(
   return data.shop;
 }
 
-const PRODUCTS_QUERY = `
-query Products($cursor: String) {
-  products(first: 100, after: $cursor) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      title
-      featuredImage { url }
-      collections(first: 1) { nodes { title } }
-      variants(first: 1) {
-        nodes { inventoryItem { unitCost { amount } } }
-      }
-    }
-  }
-}`;
-
-interface ProductsResp {
-  products: {
-    pageInfo: { hasNextPage: boolean; endCursor: string | null };
-    nodes: {
-      id: string;
-      title: string;
-      featuredImage: { url: string } | null;
-      collections: { nodes: { title: string }[] };
-      variants: { nodes: { inventoryItem: { unitCost: { amount: string } | null } | null }[] };
-    }[];
-  };
-}
-
-export async function fetchAllProducts(
-  creds: ShopifyCreds,
-  onPage?: (count: number, page: number) => void
-): Promise<ShopifyProductNorm[]> {
-  const c = await resolveCreds(creds);
-  const out: ShopifyProductNorm[] = [];
-  let cursor: string | null = null;
-  // hard cap pages to avoid runaway loops
-  for (let page = 0; page < 100; page++) {
-    const data: ProductsResp = await shopifyGraphQL<ProductsResp>(
-      c,
-      PRODUCTS_QUERY,
-      { cursor }
-    );
-    for (const p of data.products.nodes) {
-      out.push({
-        externalId: p.id,
-        title: p.title,
-        image: p.featuredImage?.url ?? null,
-        catalog: p.collections.nodes[0]?.title ?? null,
-        baseCost: num(p.variants.nodes[0]?.inventoryItem?.unitCost?.amount),
-      });
-    }
-    onPage?.(out.length, page + 1);
-    if (!data.products.pageInfo.hasNextPage) break;
-    cursor = data.products.pageInfo.endCursor;
-  }
-  return out;
-}
+// NOTE: Products are no longer fetched as a standalone catalog. We derive the
+// minimal product info we need (title + image) directly from order line items
+// in sync.ts — far less data, and no `read_inventory` scope required.
 
 // NOTE: customerJourneySummary is "protected customer data". For a custom app on your
 // own store, enable it under the app's "Protected customer data access" (quick toggle).

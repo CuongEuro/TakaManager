@@ -1,13 +1,11 @@
 // ---------------------------------------------------------------------------
-// SYNC ORCHESTRATOR — pull Shopify products + orders into the DB (idempotent).
+// SYNC ORCHESTRATOR — pull Shopify orders into the DB (idempotent).
+// Products are derived from the order line items (title + image only) — we do
+// NOT fetch the full catalog, so syncs stay small/fast and need no read_inventory.
 // Upserts by (storeId, externalId) so re-running never duplicates.
 // ---------------------------------------------------------------------------
 import { prisma } from "@/lib/prisma";
-import {
-  fetchAllProducts,
-  fetchOrdersSince,
-  ShopifyCreds,
-} from "@/lib/shopify";
+import { fetchOrdersSince, ShopifyCreds } from "@/lib/shopify";
 
 export interface SyncResult {
   storeId: string;
@@ -92,71 +90,67 @@ export async function syncStore(
     ? daysAgo(opts.sinceDays)
     : store.lastSyncedAt
     ? new Date(store.lastSyncedAt.getTime() - 2 * 86400000)
-    : daysAgo(60);
+    : daysAgo(7);
 
   emit({ phase: "start", percent: 2, message: "Đang kết nối Shopify…", products: 0, orders: 0 });
 
   try {
-    // 1) Products → fetch (2→12%) then upsert (12→35%).
-    const products = await fetchAllProducts(creds, (count, page) =>
+    // 1) Orders → fetch (5→45%). Everything we need (incl. each line's product
+    //    title + image) comes from here; no separate catalog fetch.
+    const orders = await fetchOrdersSince(creds, since, (count, page) =>
       emit({
-        phase: "products_fetch",
-        percent: fetchPct(2, 12, page),
-        message: `Đang tải sản phẩm… (${count})`,
-        products: count,
-        orders: 0,
+        phase: "orders_fetch",
+        percent: fetchPct(5, 45, page),
+        message: `Đang tải đơn hàng… (${count})`,
+        products: 0,
+        orders: count,
       })
     );
-    const totalProducts = products.length;
+    const totalOrders = orders.length;
+
+    // 2) Products → derive distinct products (title + image) from line items and
+    //    upsert (45→60%). Build externalId → internal id map to link line items.
+    const derived = new Map<string, { title: string; image: string | null }>();
+    for (const o of orders) {
+      for (const li of o.lineItems) {
+        if (li.externalProductId && !derived.has(li.externalProductId)) {
+          derived.set(li.externalProductId, { title: li.title, image: li.image });
+        }
+      }
+    }
+    const totalProducts = derived.size;
     const productMap = new Map<string, string>();
     let pi = 0;
-    for (const p of products) {
+    for (const [externalId, p] of derived) {
       const saved = await prisma.product.upsert({
-        where: { storeId_externalId: { storeId, externalId: p.externalId } },
+        where: { storeId_externalId: { storeId, externalId } },
         create: {
           organizationId,
           storeId,
-          externalId: p.externalId,
+          externalId,
           title: p.title,
           image: p.image,
-          catalog: p.catalog,
-          baseCost: p.baseCost,
+          // baseCost not pulled from Shopify → COGS comes from Cost Rules.
         },
-        update: {
-          title: p.title,
-          image: p.image,
-          catalog: p.catalog,
-          // only overwrite baseCost when Shopify provides a cost (>0)
-          ...(p.baseCost > 0 ? { baseCost: p.baseCost } : {}),
-        },
+        // Refresh title/image only; never clobber a manually-set baseCost.
+        update: { title: p.title, image: p.image },
       });
-      productMap.set(p.externalId, saved.id);
+      productMap.set(externalId, saved.id);
       pi++;
-      // throttle progress events to ~every 5% of the list (min 1)
-      if (totalProducts && (pi % Math.max(1, Math.ceil(totalProducts / 20)) === 0 || pi === totalProducts)) {
+      if (totalProducts && (pi % Math.max(1, Math.ceil(totalProducts / 15)) === 0 || pi === totalProducts)) {
         emit({
           phase: "products_save",
-          percent: 12 + Math.round((23 * pi) / totalProducts),
+          percent: 45 + Math.round((15 * pi) / totalProducts),
           message: `Đang lưu sản phẩm… (${pi}/${totalProducts})`,
           products: pi,
-          orders: 0,
+          orders: totalOrders,
           totalProducts,
+          totalOrders,
         });
       }
     }
 
-    // 2) Orders → fetch (35→55%) then upsert (55→100%).
-    const orders = await fetchOrdersSince(creds, since, (count, page) =>
-      emit({
-        phase: "orders_fetch",
-        percent: fetchPct(35, 55, page),
-        message: `Đang tải đơn hàng… (${count})`,
-        products: totalProducts,
-        orders: count,
-        totalProducts,
-      })
-    );
-    const totalOrders = orders.length;
+    // 3) Orders → upsert (60→100%), replacing line items each time.
     let oi = 0;
     for (const o of orders) {
       const lineItemData = o.lineItems.map((li) => ({
@@ -209,7 +203,7 @@ export async function syncStore(
       if (totalOrders && (oi % Math.max(1, Math.ceil(totalOrders / 25)) === 0 || oi === totalOrders)) {
         emit({
           phase: "orders_save",
-          percent: 55 + Math.round((45 * oi) / totalOrders),
+          percent: 60 + Math.round((40 * oi) / totalOrders),
           message: `Đang lưu đơn hàng… (${oi}/${totalOrders})`,
           products: totalProducts,
           orders: oi,
@@ -237,8 +231,8 @@ export async function syncStore(
     return {
       storeId,
       storeName,
-      products: products.length,
-      orders: orders.length,
+      products: totalProducts,
+      orders: totalOrders,
       since: since.toISOString(),
       ok: true,
     };

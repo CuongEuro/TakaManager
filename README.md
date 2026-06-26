@@ -96,15 +96,21 @@ Chỉ số: Net margin, **MER** (DT/Ad spend), ROAS, AOV, LN/đơn, **Break-even
 
 1. Vào **Shopify Dev Dashboard** (dev/partners) → mở app → **Settings** → copy
    **Client ID** và **Client Secret**.
-2. Trong app, cấp **Admin API scopes**: `read_orders`, `read_products`, `read_inventory`,
-   rồi **cài (install) app lên đúng store** (app & store phải **cùng tổ chức**).
+2. Trong app, cấp **Admin API scopes**: `read_orders`, `read_products`
+   (**không cần** `read_inventory`), rồi **cài (install) app lên đúng store**
+   (app & store phải **cùng tổ chức**).
 3. **(Cho attribution kênh/UTM)** Bật **Protected customer data access** cho app — cần để
    đọc `customerJourneySummary` (nguồn traffic của đơn: Facebook/Google/Twitter/Klaviyo...).
    Chưa bật vẫn đồng bộ được doanh thu/sản phẩm, chỉ thiếu phần phân loại kênh (tự fallback).
 4. Vào trang **Stores** trong TakaManager → thêm store với **domain + Client ID + Client
-   Secret** (hoặc bấm 🔑 để nhập sau) → bấm **Test** → bấm **Sync** (hoặc **Đồng bộ tất cả**).
-5. Hệ thống đổ về Dashboard: **số đơn, doanh thu, đơn theo kênh traffic, doanh thu theo
-   catalog/sản phẩm** (kèm cost làm COGS) — đủ để giai đoạn sau tối ưu hiệu quả Ads.
+   Secret** (hoặc bấm 🔑 để nhập sau) → **chọn khoảng ngày** (mặc định 7 ngày; có 1/3/7/30/60
+   hoặc từ ngày cụ thể) → bấm **Test** → bấm **Sync** (hoặc **Đồng bộ tất cả**), xem thanh %.
+5. Hệ thống đổ về Dashboard: **số đơn, doanh thu, đơn theo kênh traffic, best-seller**
+   — đủ để giai đoạn sau tối ưu hiệu quả Ads.
+
+> ⚡ **Nhẹ & nhanh:** sync **không kéo toàn bộ catalog**. Sản phẩm (chỉ **tiêu đề + 1 ảnh**)
+> được suy ra từ các **đơn trong khoảng ngày đã chọn**. Giá vốn (COGS) khai ở **Biến đổi A**
+> (Cost Rules). Kéo theo từng mốc ngắn (7 → 30 → 60) là an toàn vì sync **idempotent**.
 
 > Đồng bộ là **idempotent** (upsert theo `storeId + externalId`) — chạy lại bao nhiêu lần
 > cũng không nhân đôi dữ liệu. Để tự động hằng ngày trên cloud, gọi `POST /api/shopify/sync`
