@@ -11,13 +11,14 @@ export async function POST(req: NextRequest) {
 
   const b = await req.json().catch(() => ({}));
   const sinceDays = b.sinceDays ? Number(b.sinceDays) : undefined;
+  const since = b.since ? new Date(String(b.since)) : undefined;
 
   try {
     if (b.storeId) {
-      const result = await syncStore(String(b.storeId), session.oid, { sinceDays });
+      const result = await syncStore(String(b.storeId), session.oid, { sinceDays, since });
       return NextResponse.json({ results: [result] });
     }
-    const results = await syncAllStores(session.oid, { sinceDays });
+    const results = await syncAllStores(session.oid, { sinceDays, since });
     return NextResponse.json({ results });
   } catch (e) {
     return NextResponse.json(

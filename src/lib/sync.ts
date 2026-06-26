@@ -19,19 +19,56 @@ export interface SyncResult {
   error?: string;
 }
 
+export type SyncPhase =
+  | "start"
+  | "products_fetch"
+  | "products_save"
+  | "orders_fetch"
+  | "orders_save"
+  | "done"
+  | "error";
+
+export interface SyncProgress {
+  storeId: string;
+  storeName: string;
+  phase: SyncPhase;
+  percent: number; // 0..100 for this store
+  message: string;
+  products: number;
+  orders: number;
+  totalProducts?: number;
+  totalOrders?: number;
+}
+
+export interface SyncOpts {
+  sinceDays?: number;
+  since?: Date; // explicit start date (overrides sinceDays)
+  onProgress?: (p: SyncProgress) => void;
+}
+
+// Asymptotic progress for a fetch loop where the total is unknown: approaches
+// `to` as pages accumulate without ever reaching it.
+function fetchPct(from: number, to: number, page: number): number {
+  return Math.round(from + (to - from) * (1 - Math.pow(0.6, page)));
+}
+
 export async function syncStore(
   storeId: string,
   organizationId: string,
-  opts: { sinceDays?: number } = {}
+  opts: SyncOpts = {}
 ): Promise<SyncResult> {
   const store = await prisma.store.findUnique({ where: { id: storeId } });
   if (!store || store.organizationId !== organizationId)
     throw new Error("Store not found");
+  const storeName = store.name;
+  const emit = (p: Omit<SyncProgress, "storeId" | "storeName">) =>
+    opts.onProgress?.({ storeId, storeName, ...p });
+
   const hasClientCreds = !!(store.shopifyClientId && store.shopifyClientSecret);
   if (!store.shopifyDomain || !(store.shopifyToken || hasClientCreds)) {
     return {
       storeId,
-      storeName: store?.name ?? storeId,
+      storeName,
       products: 0,
       orders: 0,
       since: "",
@@ -48,17 +85,31 @@ export async function syncStore(
     shopifyApiVersion: store.shopifyApiVersion,
   };
 
-  // Determine "since": first sync = N days back; otherwise from last sync − 2 days.
-  const since = opts.sinceDays
+  // Determine "since": explicit date > N days back > last sync − 2 days > 60d.
+  const since = opts.since
+    ? opts.since
+    : opts.sinceDays
     ? daysAgo(opts.sinceDays)
     : store.lastSyncedAt
     ? new Date(store.lastSyncedAt.getTime() - 2 * 86400000)
     : daysAgo(60);
 
+  emit({ phase: "start", percent: 2, message: "Đang kết nối Shopify…", products: 0, orders: 0 });
+
   try {
-    // 1) Products → upsert, build externalId → internal id map.
-    const products = await fetchAllProducts(creds);
+    // 1) Products → fetch (2→12%) then upsert (12→35%).
+    const products = await fetchAllProducts(creds, (count, page) =>
+      emit({
+        phase: "products_fetch",
+        percent: fetchPct(2, 12, page),
+        message: `Đang tải sản phẩm… (${count})`,
+        products: count,
+        orders: 0,
+      })
+    );
+    const totalProducts = products.length;
     const productMap = new Map<string, string>();
+    let pi = 0;
     for (const p of products) {
       const saved = await prisma.product.upsert({
         where: { storeId_externalId: { storeId, externalId: p.externalId } },
@@ -80,10 +131,33 @@ export async function syncStore(
         },
       });
       productMap.set(p.externalId, saved.id);
+      pi++;
+      // throttle progress events to ~every 5% of the list (min 1)
+      if (totalProducts && (pi % Math.max(1, Math.ceil(totalProducts / 20)) === 0 || pi === totalProducts)) {
+        emit({
+          phase: "products_save",
+          percent: 12 + Math.round((23 * pi) / totalProducts),
+          message: `Đang lưu sản phẩm… (${pi}/${totalProducts})`,
+          products: pi,
+          orders: 0,
+          totalProducts,
+        });
+      }
     }
 
-    // 2) Orders → upsert, replacing line items each time.
-    const orders = await fetchOrdersSince(creds, since);
+    // 2) Orders → fetch (35→55%) then upsert (55→100%).
+    const orders = await fetchOrdersSince(creds, since, (count, page) =>
+      emit({
+        phase: "orders_fetch",
+        percent: fetchPct(35, 55, page),
+        message: `Đang tải đơn hàng… (${count})`,
+        products: totalProducts,
+        orders: count,
+        totalProducts,
+      })
+    );
+    const totalOrders = orders.length;
+    let oi = 0;
     for (const o of orders) {
       const lineItemData = o.lineItems.map((li) => ({
         productId: li.externalProductId
@@ -131,6 +205,18 @@ export async function syncStore(
           lineItems: { deleteMany: {}, create: lineItemData },
         },
       });
+      oi++;
+      if (totalOrders && (oi % Math.max(1, Math.ceil(totalOrders / 25)) === 0 || oi === totalOrders)) {
+        emit({
+          phase: "orders_save",
+          percent: 55 + Math.round((45 * oi) / totalOrders),
+          message: `Đang lưu đơn hàng… (${oi}/${totalOrders})`,
+          products: totalProducts,
+          orders: oi,
+          totalProducts,
+          totalOrders,
+        });
+      }
     }
 
     await prisma.store.update({
@@ -138,18 +224,35 @@ export async function syncStore(
       data: { lastSyncedAt: new Date() },
     });
 
+    emit({
+      phase: "done",
+      percent: 100,
+      message: `Hoàn tất: ${totalProducts} sản phẩm, ${totalOrders} đơn.`,
+      products: totalProducts,
+      orders: totalOrders,
+      totalProducts,
+      totalOrders,
+    });
+
     return {
       storeId,
-      storeName: store.name,
+      storeName,
       products: products.length,
       orders: orders.length,
       since: since.toISOString(),
       ok: true,
     };
   } catch (e) {
+    emit({
+      phase: "error",
+      percent: 100,
+      message: e instanceof Error ? e.message : String(e),
+      products: 0,
+      orders: 0,
+    });
     return {
       storeId,
-      storeName: store.name,
+      storeName,
       products: 0,
       orders: 0,
       since: since.toISOString(),
@@ -159,11 +262,8 @@ export async function syncStore(
   }
 }
 
-/** Sync every store in the org that has Shopify credentials. */
-export async function syncAllStores(
-  organizationId: string,
-  opts: { sinceDays?: number } = {}
-): Promise<SyncResult[]> {
+/** IDs of every active store in the org that has usable Shopify credentials. */
+export async function listSyncableStoreIds(organizationId: string): Promise<string[]> {
   const stores = await prisma.store.findMany({
     where: {
       organizationId,
@@ -180,10 +280,19 @@ export async function syncAllStores(
       ],
     },
     select: { id: true },
+    orderBy: { name: "asc" },
   });
+  return stores.map((s) => s.id);
+}
+
+/** Sync every store in the org that has Shopify credentials. */
+export async function syncAllStores(
+  organizationId: string,
+  opts: SyncOpts = {}
+): Promise<SyncResult[]> {
+  const ids = await listSyncableStoreIds(organizationId);
   const results: SyncResult[] = [];
-  for (const s of stores)
-    results.push(await syncStore(s.id, organizationId, opts));
+  for (const id of ids) results.push(await syncStore(id, organizationId, opts));
   return results;
 }
 

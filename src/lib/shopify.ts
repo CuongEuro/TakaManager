@@ -191,7 +191,8 @@ interface ProductsResp {
 }
 
 export async function fetchAllProducts(
-  creds: ShopifyCreds
+  creds: ShopifyCreds,
+  onPage?: (count: number, page: number) => void
 ): Promise<ShopifyProductNorm[]> {
   const c = await resolveCreds(creds);
   const out: ShopifyProductNorm[] = [];
@@ -212,6 +213,7 @@ export async function fetchAllProducts(
         baseCost: num(p.variants.nodes[0]?.inventoryItem?.unitCost?.amount),
       });
     }
+    onPage?.(out.length, page + 1);
     if (!data.products.pageInfo.hasNextPage) break;
     cursor = data.products.pageInfo.endCursor;
   }
@@ -395,7 +397,8 @@ export function normalizeOrder(
 
 export async function fetchOrdersSince(
   creds: ShopifyCreds,
-  since: Date
+  since: Date,
+  onPage?: (count: number, page: number) => void
 ): Promise<ShopifyOrderNorm[]> {
   const c = await resolveCreds(creds);
   const out: ShopifyOrderNorm[] = [];
@@ -424,6 +427,7 @@ export async function fetchOrdersSince(
       }
     }
     for (const o of data.orders.nodes) out.push(normalizeOrder(o, useJourney));
+    onPage?.(out.length, page + 1);
     if (!data.orders.pageInfo.hasNextPage) break;
     cursor = data.orders.pageInfo.endCursor;
   }
