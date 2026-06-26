@@ -80,6 +80,12 @@ async function syncStorePaged(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (res.status === 404) {
+      throw new Error(
+        "Phiên bản mới chưa sẵn sàng (HTTP 404). Chờ Vercel deploy 'Ready' rồi " +
+          "tải lại trang (Ctrl+Shift+R) và thử lại."
+      );
+    }
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
       throw new Error(e.error ?? `HTTP ${res.status}`);
