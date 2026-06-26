@@ -27,7 +27,8 @@ export async function syncStore(
   const store = await prisma.store.findUnique({ where: { id: storeId } });
   if (!store || store.organizationId !== organizationId)
     throw new Error("Store not found");
-  if (!store.shopifyDomain || !store.shopifyToken) {
+  const hasClientCreds = !!(store.shopifyClientId && store.shopifyClientSecret);
+  if (!store.shopifyDomain || !(store.shopifyToken || hasClientCreds)) {
     return {
       storeId,
       storeName: store?.name ?? storeId,
@@ -35,12 +36,14 @@ export async function syncStore(
       orders: 0,
       since: "",
       ok: false,
-      error: "Thiếu Shopify domain hoặc access token.",
+      error: "Thiếu Shopify domain hoặc khoá kết nối (Client ID/Secret hoặc token).",
     };
   }
 
   const creds: ShopifyCreds = {
     shopifyDomain: store.shopifyDomain,
+    shopifyClientId: store.shopifyClientId,
+    shopifyClientSecret: store.shopifyClientSecret,
     shopifyToken: store.shopifyToken,
     shopifyApiVersion: store.shopifyApiVersion,
   };
@@ -162,7 +165,20 @@ export async function syncAllStores(
   opts: { sinceDays?: number } = {}
 ): Promise<SyncResult[]> {
   const stores = await prisma.store.findMany({
-    where: { organizationId, active: true, shopifyToken: { not: null } },
+    where: {
+      organizationId,
+      active: true,
+      shopifyDomain: { not: null },
+      OR: [
+        { shopifyToken: { not: null } },
+        {
+          AND: [
+            { shopifyClientId: { not: null } },
+            { shopifyClientSecret: { not: null } },
+          ],
+        },
+      ],
+    },
     select: { id: true },
   });
   const results: SyncResult[] = [];

@@ -1,11 +1,20 @@
 // ---------------------------------------------------------------------------
 // SHOPIFY ADMIN API (GraphQL) client — fetch products & orders for a store.
-// Auth: custom app Admin API access token (shpat_...), header X-Shopify-Access-Token.
+// Auth (2026+): Dev Dashboard apps give a Client ID + Client Secret which we
+// exchange for a 24h Admin API access token via the client credentials grant,
+// then send as header X-Shopify-Access-Token. Legacy custom-app tokens
+// (shpat_...) are still accepted directly if provided.
+// Docs: https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/client-credentials-grant
 // ---------------------------------------------------------------------------
 
 export interface ShopifyCreds {
   shopifyDomain: string;
-  shopifyToken: string;
+  // New flow: exchange these for a token. Either provide BOTH of these, or a
+  // legacy shopifyToken below.
+  shopifyClientId?: string | null;
+  shopifyClientSecret?: string | null;
+  // Legacy admin token (shpat_...) OR the resolved token after an exchange.
+  shopifyToken?: string | null;
   shopifyApiVersion?: string;
 }
 
@@ -44,10 +53,65 @@ export interface ShopifyOrderNorm {
 
 const DEFAULT_VERSION = "2025-01";
 
+function shopBase(creds: ShopifyCreds): string {
+  const domain = creds.shopifyDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  return `https://${domain}`;
+}
+
 function endpoint(creds: ShopifyCreds): string {
   const version = creds.shopifyApiVersion || DEFAULT_VERSION;
-  const domain = creds.shopifyDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
-  return `https://${domain}/admin/api/${version}/graphql.json`;
+  return `${shopBase(creds)}/admin/api/${version}/graphql.json`;
+}
+
+/**
+ * Resolve an Admin API access token for the store.
+ * - New (2026+) Dev Dashboard apps: POST the Client ID + Client Secret to the
+ *   client credentials grant endpoint and get back a ~24h access token. Only
+ *   works for apps in your own Shopify org installed on stores you own.
+ * - Legacy: a stored shpat_ token is returned as-is.
+ */
+export async function getAccessToken(creds: ShopifyCreds): Promise<string> {
+  if (creds.shopifyClientId && creds.shopifyClientSecret) {
+    const res = await fetch(`${shopBase(creds)}/admin/oauth/access_token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: creds.shopifyClientId,
+        client_secret: creds.shopifyClientSecret,
+      }),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(
+        `Shopify token exchange HTTP ${res.status}: ${text.slice(0, 300)}. ` +
+          `Kiểm tra Client ID/Secret và app phải cùng tổ chức + đã cài lên store.`
+      );
+    }
+    let json: { access_token?: string };
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(`Shopify token exchange: phản hồi không hợp lệ: ${text.slice(0, 200)}`);
+    }
+    if (!json.access_token)
+      throw new Error("Shopify token exchange: phản hồi thiếu access_token.");
+    return json.access_token;
+  }
+  if (creds.shopifyToken) return creds.shopifyToken;
+  throw new Error(
+    "Thiếu thông tin xác thực Shopify: cần Client ID + Client Secret (Dev Dashboard) " +
+      "hoặc Admin API token (shpat_...) cũ."
+  );
+}
+
+/** Return a copy of creds whose shopifyToken is a freshly-resolved token. */
+async function resolveCreds(creds: ShopifyCreds): Promise<ShopifyCreds> {
+  const token = await getAccessToken(creds);
+  return { ...creds, shopifyToken: token };
 }
 
 function num(v: unknown): number {
@@ -64,7 +128,7 @@ export async function shopifyGraphQL<T>(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Shopify-Access-Token": creds.shopifyToken,
+      "X-Shopify-Access-Token": creds.shopifyToken ?? "",
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -90,9 +154,10 @@ export async function shopifyGraphQL<T>(
 export async function testConnection(
   creds: ShopifyCreds
 ): Promise<{ name: string; currencyCode: string }> {
+  const c = await resolveCreds(creds);
   const data = await shopifyGraphQL<{
     shop: { name: string; currencyCode: string };
-  }>(creds, `{ shop { name currencyCode } }`);
+  }>(c, `{ shop { name currencyCode } }`);
   return data.shop;
 }
 
@@ -128,12 +193,13 @@ interface ProductsResp {
 export async function fetchAllProducts(
   creds: ShopifyCreds
 ): Promise<ShopifyProductNorm[]> {
+  const c = await resolveCreds(creds);
   const out: ShopifyProductNorm[] = [];
   let cursor: string | null = null;
   // hard cap pages to avoid runaway loops
   for (let page = 0; page < 100; page++) {
     const data: ProductsResp = await shopifyGraphQL<ProductsResp>(
-      creds,
+      c,
       PRODUCTS_QUERY,
       { cursor }
     );
@@ -173,6 +239,32 @@ query Orders($cursor: String, $query: String) {
           utmParameters { source medium campaign }
         }
       }
+      lineItems(first: 100) {
+        nodes {
+          title
+          quantity
+          originalUnitPriceSet { shopMoney { amount } }
+          product { id featuredImage { url } }
+        }
+      }
+    }
+  }
+}`;
+
+// Fallback query without customerJourneySummary — used automatically when the
+// app doesn't have "Protected customer data access" yet (so sync still works,
+// just without per-order channel attribution).
+const ORDERS_QUERY_BASIC = `
+query Orders($cursor: String, $query: String) {
+  orders(first: 50, after: $cursor, query: $query, sortKey: CREATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      createdAt
+      sourceName
+      totalDiscountsSet { shopMoney { amount } }
+      totalTaxSet { shopMoney { amount } }
+      totalShippingPriceSet { shopMoney { amount } }
       lineItems(first: 100) {
         nodes {
           title
@@ -259,9 +351,12 @@ export function classifyChannel(visit: Visit | null): {
   return { channel, utmSource, utmMedium, utmCampaign };
 }
 
-/** Normalize one raw order node (exported for unit-testing the mapping). */
+/** Normalize one raw order node (exported for unit-testing the mapping).
+ *  hasJourney=false when the customer-journey field was unavailable (no
+ *  protected-data access) → attribution is left UNKNOWN instead of guessing. */
 export function normalizeOrder(
-  o: OrdersResp["orders"]["nodes"][number]
+  o: OrdersResp["orders"]["nodes"][number],
+  hasJourney = true
 ): ShopifyOrderNorm {
   let gross = 0;
   let units = 0;
@@ -277,7 +372,9 @@ export function normalizeOrder(
       price,
     };
   });
-  const attr = classifyChannel(o.customerJourneySummary?.lastVisit ?? null);
+  const attr = hasJourney
+    ? classifyChannel(o.customerJourneySummary?.lastVisit ?? null)
+    : { channel: "OTHER", utmSource: null, utmMedium: null, utmCampaign: null };
 
   return {
     externalId: o.id,
@@ -300,15 +397,33 @@ export async function fetchOrdersSince(
   creds: ShopifyCreds,
   since: Date
 ): Promise<ShopifyOrderNorm[]> {
+  const c = await resolveCreds(creds);
   const out: ShopifyOrderNorm[] = [];
   const queryStr = `created_at:>=${since.toISOString()} status:any`;
   let cursor: string | null = null;
+  let useJourney = true; // downgrade to basic query if protected data is denied
   for (let page = 0; page < 200; page++) {
-    const data: OrdersResp = await shopifyGraphQL<OrdersResp>(creds, ORDERS_QUERY, {
-      cursor,
-      query: queryStr,
-    });
-    for (const o of data.orders.nodes) out.push(normalizeOrder(o));
+    let data: OrdersResp;
+    try {
+      data = await shopifyGraphQL<OrdersResp>(
+        c,
+        useJourney ? ORDERS_QUERY : ORDERS_QUERY_BASIC,
+        { cursor, query: queryStr }
+      );
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      // Protected customer data not enabled → retry this page without journey.
+      if (useJourney && /customerJourney|protected|customer data|access denied|not approved|ACCESS_DENIED/i.test(m)) {
+        useJourney = false;
+        data = await shopifyGraphQL<OrdersResp>(c, ORDERS_QUERY_BASIC, {
+          cursor,
+          query: queryStr,
+        });
+      } else {
+        throw e;
+      }
+    }
+    for (const o of data.orders.nodes) out.push(normalizeOrder(o, useJourney));
     if (!data.orders.pageInfo.hasNextPage) break;
     cursor = data.orders.pageInfo.endCursor;
   }

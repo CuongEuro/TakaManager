@@ -16,6 +16,8 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
     data: {
       name: b.name != null ? String(b.name) : undefined,
       shopifyDomain: b.shopifyDomain !== undefined ? b.shopifyDomain || null : undefined,
+      shopifyClientId: b.shopifyClientId !== undefined ? b.shopifyClientId || null : undefined,
+      shopifyClientSecret: b.shopifyClientSecret ? String(b.shopifyClientSecret) : undefined,
       shopifyToken: b.shopifyToken ? String(b.shopifyToken) : undefined,
       shopifyApiVersion: b.shopifyApiVersion || undefined,
       currency: b.currency ?? undefined,

@@ -15,20 +15,25 @@ export async function POST(req: NextRequest) {
     const store = await prisma.store.findFirst({
       where: { id: b.storeId, organizationId: session.oid },
     });
-    if (!store?.shopifyDomain || !store?.shopifyToken) {
+    const hasClientCreds = !!(store?.shopifyClientId && store?.shopifyClientSecret);
+    if (!store?.shopifyDomain || !(store?.shopifyToken || hasClientCreds)) {
       return NextResponse.json(
-        { ok: false, error: "Store chưa có domain/token." },
+        { ok: false, error: "Store chưa có domain + khoá (Client ID/Secret hoặc token)." },
         { status: 400 }
       );
     }
     creds = {
       shopifyDomain: store.shopifyDomain,
+      shopifyClientId: store.shopifyClientId,
+      shopifyClientSecret: store.shopifyClientSecret,
       shopifyToken: store.shopifyToken,
       shopifyApiVersion: store.shopifyApiVersion,
     };
-  } else if (b.shopifyDomain && b.shopifyToken) {
+  } else if (b.shopifyDomain && (b.shopifyToken || (b.shopifyClientId && b.shopifyClientSecret))) {
     creds = {
       shopifyDomain: b.shopifyDomain,
+      shopifyClientId: b.shopifyClientId,
+      shopifyClientSecret: b.shopifyClientSecret,
       shopifyToken: b.shopifyToken,
       shopifyApiVersion: b.shopifyApiVersion,
     };

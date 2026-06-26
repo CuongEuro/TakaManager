@@ -10,10 +10,11 @@ export async function GET() {
     where: { organizationId: session.oid },
     orderBy: { name: "asc" },
   });
-  // Never expose the raw access token to the client; send a boolean flag instead.
-  const safe = stores.map(({ shopifyToken, ...s }) => ({
+  // Never expose secrets to the client; send boolean flags instead.
+  const safe = stores.map(({ shopifyToken, shopifyClientSecret, ...s }) => ({
     ...s,
     hasToken: !!shopifyToken,
+    hasClientCreds: !!(s.shopifyClientId && shopifyClientSecret),
   }));
   return NextResponse.json(safe);
 }
@@ -29,6 +30,8 @@ export async function POST(req: NextRequest) {
       organizationId: session.oid,
       name: String(b.name),
       shopifyDomain: b.shopifyDomain || null,
+      shopifyClientId: b.shopifyClientId || null,
+      shopifyClientSecret: b.shopifyClientSecret || null,
       shopifyToken: b.shopifyToken || null,
       shopifyApiVersion: b.shopifyApiVersion || undefined,
       currency: b.currency || "JPY",

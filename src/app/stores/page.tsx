@@ -20,18 +20,26 @@ interface Store {
   id: string;
   name: string;
   shopifyDomain: string | null;
+  shopifyClientId: string | null;
   shopifyApiVersion: string;
   currency: string;
   taxRate: number;
   active: boolean;
   lastSyncedAt: string | null;
   hasToken: boolean;
+  hasClientCreds: boolean;
 }
 
 export default function StoresPage() {
   const { items, loading, create, update, remove, load } =
     useResource<Store>("/api/stores");
-  const [form, setForm] = useState({ name: "", domain: "", token: "", taxRate: "10" });
+  const [form, setForm] = useState({
+    name: "",
+    domain: "",
+    clientId: "",
+    clientSecret: "",
+    taxRate: "10",
+  });
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ id: string; text: string; ok: boolean } | null>(
     null
@@ -42,10 +50,11 @@ export default function StoresPage() {
     await create({
       name: form.name.trim(),
       shopifyDomain: form.domain.trim() || null,
-      shopifyToken: form.token.trim() || null,
+      shopifyClientId: form.clientId.trim() || null,
+      shopifyClientSecret: form.clientSecret.trim() || null,
       taxRate: Number(form.taxRate) / 100,
     });
-    setForm({ name: "", domain: "", token: "", taxRate: "10" });
+    setForm({ name: "", domain: "", clientId: "", clientSecret: "", taxRate: "10" });
   }
 
   async function testConn(id: string) {
@@ -113,10 +122,18 @@ export default function StoresPage() {
     }
   }
 
-  async function setToken(id: string) {
-    const token = window.prompt("Dán Shopify Admin API access token (shpat_...):");
-    if (token === null) return;
-    await update(id, { shopifyToken: token.trim() });
+  async function setCreds(id: string) {
+    const clientId = window.prompt(
+      "Shopify Client ID (Dev Dashboard → App → Settings → Client ID):"
+    );
+    if (clientId === null) return;
+    const clientSecret = window.prompt("Shopify Client Secret:");
+    if (clientSecret === null) return;
+    await update(id, {
+      shopifyClientId: clientId.trim(),
+      shopifyClientSecret: clientSecret.trim(),
+    });
+    await load();
   }
 
   return (
@@ -142,7 +159,7 @@ export default function StoresPage() {
       )}
 
       <Card className="mb-6">
-        <div className="grid gap-3 md:grid-cols-[1fr_1fr_1.4fr_90px_auto] md:items-end">
+        <div className="grid gap-3 md:grid-cols-2 md:items-end">
           <Field label="Tên store">
             <Input
               value={form.name}
@@ -157,11 +174,19 @@ export default function StoresPage() {
               placeholder="my-shop.myshopify.com"
             />
           </Field>
-          <Field label="Admin API token (shpat_...)">
+          <Field label="Client ID">
             <Input
-              value={form.token}
-              onChange={(e) => setForm({ ...form, token: e.target.value })}
-              placeholder="tuỳ chọn — có thể thêm sau"
+              value={form.clientId}
+              onChange={(e) => setForm({ ...form, clientId: e.target.value })}
+              placeholder="Dev Dashboard → App → Settings → Client ID"
+            />
+          </Field>
+          <Field label="Client Secret">
+            <Input
+              type="password"
+              value={form.clientSecret}
+              onChange={(e) => setForm({ ...form, clientSecret: e.target.value })}
+              placeholder="Client Secret (bấm 👁 trong Dev Dashboard để xem)"
             />
           </Field>
           <Field label="Thuế (%)">
@@ -171,13 +196,28 @@ export default function StoresPage() {
               onChange={(e) => setForm({ ...form, taxRate: e.target.value })}
             />
           </Field>
-          <Button onClick={add}>+ Thêm</Button>
+          <div className="flex items-end">
+            <Button onClick={add}>+ Thêm store</Button>
+          </div>
         </div>
-        <p className="mt-3 text-xs text-slate-400">
-          💡 Tạo <b>Custom app</b> trong Shopify Admin → Settings → Apps → Develop
-          apps → cấp quyền <code>read_orders</code>, <code>read_products</code>,
-          <code> read_inventory</code> → Install → copy Admin API access token.
-        </p>
+        <div className="mt-3 space-y-1 text-xs text-slate-400">
+          <p>
+            💡 <b>Cách lấy Client ID / Secret (Shopify 2026):</b> token{" "}
+            <code>shpat_</code> cũ đã bị Shopify ngừng. Tạo app ở{" "}
+            <b>Dev Dashboard</b> (partners/dev) → mục <b>Settings</b> → copy{" "}
+            <b>Client ID</b> và <b>Client Secret</b>.
+          </p>
+          <p>
+            ⚙️ Trong app, cấp <b>Admin API scopes</b>: <code>read_orders</code>,{" "}
+            <code>read_products</code>, <code>read_inventory</code>, rồi{" "}
+            <b>cài (install) app lên đúng store</b> (app & store phải cùng tổ chức).
+          </p>
+          <p>
+            🔒 Muốn biết đơn đến từ kênh nào (Facebook/Google/Klaviyo...), bật thêm{" "}
+            <b>Protected customer data access</b> cho app. Chưa bật vẫn đồng bộ
+            được doanh thu/sản phẩm, chỉ thiếu phần phân loại kênh.
+          </p>
+        </div>
       </Card>
 
       <Card>
@@ -203,10 +243,12 @@ export default function StoresPage() {
                   <Td className="font-medium text-slate-800">{s.name}</Td>
                   <Td className="text-slate-500">{s.shopifyDomain || "—"}</Td>
                   <Td>
-                    {s.hasToken ? (
-                      <Badge tone="green">Có token</Badge>
+                    {s.hasClientCreds ? (
+                      <Badge tone="green">Có Client ID/Secret</Badge>
+                    ) : s.hasToken ? (
+                      <Badge tone="green">Có token (cũ)</Badge>
                     ) : (
-                      <Badge tone="amber">Chưa có token</Badge>
+                      <Badge tone="amber">Chưa có khoá</Badge>
                     )}
                   </Td>
                   <Td className="text-slate-500">
@@ -217,19 +259,23 @@ export default function StoresPage() {
                   <Td>{formatPercent(s.taxRate)}</Td>
                   <Td className="text-right">
                     <div className="flex justify-end gap-1">
-                      <Button variant="secondary" onClick={() => setToken(s.id)}>
+                      <Button
+                        variant="secondary"
+                        onClick={() => setCreds(s.id)}
+                        title="Cập nhật Client ID + Secret"
+                      >
                         🔑
                       </Button>
                       <Button
                         variant="secondary"
                         onClick={() => testConn(s.id)}
-                        disabled={busy === s.id || !s.hasToken}
+                        disabled={busy === s.id || !(s.hasToken || s.hasClientCreds)}
                       >
                         Test
                       </Button>
                       <Button
                         onClick={() => sync(s.id)}
-                        disabled={busy === s.id || !s.hasToken}
+                        disabled={busy === s.id || !(s.hasToken || s.hasClientCreds)}
                       >
                         {busy === s.id ? "..." : "Sync"}
                       </Button>

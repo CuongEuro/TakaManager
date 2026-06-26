@@ -88,15 +88,22 @@ Chỉ số: Net margin, **MER** (DT/Ad spend), ROAS, AOV, LN/đơn, **Break-even
 
 ## Kết nối Shopify (Phase 2)
 
-1. Trong Shopify Admin của store: **Settings → Apps and sales channels → Develop apps
-   → Create an app**.
-2. Cấp **Admin API scopes**: `read_orders`, `read_products`, `read_inventory`.
+> ⚠️ **Thay đổi xác thực 2026:** Shopify đã **ngừng** token custom-app cũ (`shpat_...`
+> hiện trong Admin) từ **01/01/2026**. App mới tạo ở **Dev Dashboard** chỉ cho
+> **Client ID + Client Secret**; TakaManager tự **đổi lấy access token 24h** qua
+> *client credentials grant* (`POST /admin/oauth/access_token`). Token cũ vẫn dùng được
+> nếu bạn còn.
+
+1. Vào **Shopify Dev Dashboard** (dev/partners) → mở app → **Settings** → copy
+   **Client ID** và **Client Secret**.
+2. Trong app, cấp **Admin API scopes**: `read_orders`, `read_products`, `read_inventory`,
+   rồi **cài (install) app lên đúng store** (app & store phải **cùng tổ chức**).
 3. **(Cho attribution kênh/UTM)** Bật **Protected customer data access** cho app — cần để
    đọc `customerJourneySummary` (nguồn traffic của đơn: Facebook/Google/Twitter/Klaviyo...).
-4. **Install app** → copy **Admin API access token** (`shpat_...`).
-5. Vào trang **Stores** trong TakaManager → thêm store với domain + token (hoặc bấm 🔑 để
-   dán token sau) → bấm **Test** để kiểm tra → bấm **Sync** (hoặc **Đồng bộ tất cả**).
-6. Hệ thống đổ về Dashboard: **số đơn, doanh thu, đơn theo kênh traffic, doanh thu theo
+   Chưa bật vẫn đồng bộ được doanh thu/sản phẩm, chỉ thiếu phần phân loại kênh (tự fallback).
+4. Vào trang **Stores** trong TakaManager → thêm store với **domain + Client ID + Client
+   Secret** (hoặc bấm 🔑 để nhập sau) → bấm **Test** → bấm **Sync** (hoặc **Đồng bộ tất cả**).
+5. Hệ thống đổ về Dashboard: **số đơn, doanh thu, đơn theo kênh traffic, doanh thu theo
    catalog/sản phẩm** (kèm cost làm COGS) — đủ để giai đoạn sau tối ưu hiệu quả Ads.
 
 > Đồng bộ là **idempotent** (upsert theo `storeId + externalId`) — chạy lại bao nhiêu lần

@@ -65,7 +65,12 @@ model Store {
   organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name              String
   shopifyDomain     String? // e.g. "my-shop.myshopify.com"
-  shopifyToken      String? // Admin API access token (shpat_...) — Phase 2
+  // New (2026+) Dev Dashboard apps: exchange these for a 24h token via the
+  // client credentials grant. Works for apps in your own org + stores you own.
+  shopifyClientId     String?
+  shopifyClientSecret String?
+  // Legacy admin custom-app token (shpat_...) — still accepted if present.
+  shopifyToken      String?
   shopifyApiVersion String    @default("2025-01")
   lastSyncedAt      DateTime?
   currency          String    @default("JPY")
