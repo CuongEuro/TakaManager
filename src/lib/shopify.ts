@@ -6,6 +6,7 @@
 // (shpat_...) are still accepted directly if provided.
 // Docs: https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/client-credentials-grant
 // ---------------------------------------------------------------------------
+import { createHmac, timingSafeEqual } from "crypto";
 
 export interface ShopifyCreds {
   shopifyDomain: string;
@@ -448,4 +449,142 @@ export async function fetchOrdersSince(
     cursor = p.nextCursor;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// WEBHOOKS — real-time order ingestion.
+// Shopify signs each webhook body with the app's client secret (HMAC-SHA256,
+// base64) in the X-Shopify-Hmac-Sha256 header. We register orders/create +
+// orders/updated so new and edited orders flow in without a manual Sync.
+// ---------------------------------------------------------------------------
+
+/** Verify a webhook came from Shopify (HMAC-SHA256 of the raw body, base64). */
+export function verifyWebhookHmac(
+  rawBody: string,
+  hmacHeader: string,
+  secret: string
+): boolean {
+  if (!hmacHeader || !secret) return false;
+  const digest = createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
+  const a = Buffer.from(digest);
+  const b = Buffer.from(hmacHeader);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+// Minimal shape of the REST order payload Shopify sends in order webhooks.
+interface WebhookOrderPayload {
+  id: number | string;
+  created_at: string;
+  total_discounts?: string;
+  total_tax?: string;
+  total_shipping_price_set?: { shop_money?: { amount?: string } } | null;
+  shipping_lines?: { price?: string }[];
+  source_name?: string | null;
+  landing_site?: string | null;
+  referring_site?: string | null;
+  line_items?: {
+    title: string;
+    quantity: number;
+    price?: string;
+    product_id?: number | string | null;
+  }[];
+}
+
+/** Normalize a webhook (REST) order into the same shape as the GraphQL sync.
+ *  Builds GraphQL-style GIDs so upserts hit the SAME row (no duplicates). */
+export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm {
+  let gross = 0;
+  let units = 0;
+  const lineItems: ShopifyOrderLineNorm[] = (p.line_items ?? []).map((li) => {
+    const price = num(li.price);
+    gross += price * li.quantity;
+    units += li.quantity;
+    return {
+      externalProductId:
+        li.product_id != null ? `gid://shopify/Product/${li.product_id}` : null,
+      title: li.title,
+      image: null, // webhook payload has no product image; a later sync fills it
+      quantity: li.quantity,
+      price,
+    };
+  });
+
+  // Best-effort channel from landing_site UTM params + referrer.
+  let utm: { source: string | null; medium: string | null; campaign: string | null } = {
+    source: null,
+    medium: null,
+    campaign: null,
+  };
+  if (p.landing_site && p.landing_site.includes("?")) {
+    const qs = new URLSearchParams(p.landing_site.split("?")[1]);
+    utm = {
+      source: qs.get("utm_source"),
+      medium: qs.get("utm_medium"),
+      campaign: qs.get("utm_campaign"),
+    };
+  }
+  const attr = classifyChannel({
+    source: null,
+    sourceType: null,
+    referrerUrl: p.referring_site ?? null,
+    utmParameters: utm,
+  });
+
+  const shipping =
+    num(p.total_shipping_price_set?.shop_money?.amount) ||
+    (p.shipping_lines ?? []).reduce((s, l) => s + num(l.price), 0);
+
+  return {
+    externalId: `gid://shopify/Order/${p.id}`,
+    date: new Date(p.created_at),
+    grossRevenue: gross,
+    discounts: num(p.total_discounts),
+    tax: num(p.total_tax),
+    shippingCharged: shipping,
+    itemsCount: units,
+    channel: attr.channel,
+    utmSource: attr.utmSource,
+    utmMedium: attr.utmMedium,
+    utmCampaign: attr.utmCampaign,
+    sourceName: p.source_name ?? null,
+    lineItems,
+  };
+}
+
+const WEBHOOK_CREATE = `
+mutation Create($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {
+    webhookSubscription { id }
+    userErrors { field message }
+  }
+}`;
+
+/** Subscribe a store to orders/create + orders/updated webhooks pointing at
+ *  callbackUrl. "Already exists" is treated as success (idempotent). */
+export async function registerOrderWebhooks(
+  creds: ShopifyCreds,
+  callbackUrl: string
+): Promise<{ created: number; errors: string[] }> {
+  const c = await resolveCreds(creds);
+  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED"];
+  let created = 0;
+  const errors: string[] = [];
+  for (const topic of topics) {
+    const data = await shopifyGraphQL<{
+      webhookSubscriptionCreate: {
+        webhookSubscription: { id: string } | null;
+        userErrors: { message: string }[];
+      };
+    }>(c, WEBHOOK_CREATE, { topic, sub: { callbackUrl, format: "JSON" } });
+    const r = data.webhookSubscriptionCreate;
+    if (r.webhookSubscription) {
+      created++;
+    } else {
+      const msg = r.userErrors.map((e) => e.message).join("; ");
+      if (/already|taken|exists/i.test(msg)) created++; // idempotent
+      else errors.push(`${topic}: ${msg || "unknown error"}`);
+    }
+  }
+  return { created, errors };
 }

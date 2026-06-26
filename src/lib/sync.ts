@@ -144,6 +144,18 @@ async function upsertOrders(
   }
 }
 
+/** Ingest a batch of already-normalized orders (used by the webhook receiver).
+ *  Idempotent: same externalId → same row. Returns counts. */
+export async function ingestOrders(
+  storeId: string,
+  organizationId: string,
+  orders: ShopifyOrderNorm[]
+): Promise<{ products: number; orders: number }> {
+  const productMap = await upsertProductsFromOrders(orders, storeId, organizationId);
+  await upsertOrders(orders, storeId, organizationId, productMap);
+  return { products: productMap.size, orders: orders.length };
+}
+
 // --- page-by-page sync (browser-driven) ------------------------------------
 
 export interface SyncPageOpts extends SyncOpts {

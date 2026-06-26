@@ -112,6 +112,22 @@ Chỉ số: Net margin, **MER** (DT/Ad spend), ROAS, AOV, LN/đơn, **Break-even
 > được suy ra từ các **đơn trong khoảng ngày đã chọn**. Giá vốn (COGS) khai ở **Biến đổi A**
 > (Cost Rules). Kéo theo từng mốc ngắn (7 → 30 → 60) là an toàn vì sync **idempotent**.
 
+> 🧩 **Kéo theo trang (không timeout):** mỗi lần Sync, trình duyệt gọi `POST /api/shopify/sync/page`
+> lặp lại theo `cursor` (mỗi request ~25 đơn) cho tới hết → không bao giờ chạm giới hạn thời gian
+> serverless; thanh % tính theo tổng đơn thật (`ordersCount`).
+
+### Tự động đồng bộ thời gian thực (Webhook)
+
+Bấm **🔔 Tự động** ở mỗi store để đăng ký webhook `orders/create` + `orders/updated`. Sau đó
+**đơn mới / cập nhật từ Shopify sẽ tự đổ về** (không cần bấm Sync).
+
+- Endpoint nhận: `POST /api/shopify/webhook` (công khai, xác thực bằng **HMAC** chữ ký của Shopify
+  dùng **Client Secret** của app — không cần đăng nhập; đã allow-list trong `middleware.ts`).
+- Webhook dùng **cùng `externalId`** (GID) như sync thủ công → **không trùng/không ghi đè nhầm**.
+  Đơn từ webhook tạm thời có thể thiếu phân loại kênh; lần Sync sau sẽ cập nhật đúng cùng dòng.
+- Cần app có **Client ID + Client Secret** (đã cài lên store). Trạng thái hiện badge **🔔 Tự động**.
+- ⚠️ Cần chạy `npx prisma db push` **một lần** (thêm cột `Store.webhooksEnabled`).
+
 > Đồng bộ là **idempotent** (upsert theo `storeId + externalId`) — chạy lại bao nhiêu lần
 > cũng không nhân đôi dữ liệu. Để tự động hằng ngày trên cloud, gọi `POST /api/shopify/sync`
 > bằng cron (Vercel Cron / GitHub Actions).

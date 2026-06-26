@@ -8,8 +8,13 @@ const PUBLIC_PAGES = ["/login", "/signup"];
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Always allow auth endpoints and the login/signup pages.
-  if (pathname.startsWith("/api/auth") || PUBLIC_PAGES.includes(pathname)) {
+  // Always allow auth endpoints, the Shopify webhook receiver (verified by HMAC,
+  // not by session), and the login/signup pages.
+  if (
+    pathname.startsWith("/api/auth") ||
+    pathname === "/api/shopify/webhook" ||
+    PUBLIC_PAGES.includes(pathname)
+  ) {
     return NextResponse.next();
   }
 

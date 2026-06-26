@@ -128,6 +128,7 @@ interface Store {
   lastSyncedAt: string | null;
   hasToken: boolean;
   hasClientCreds: boolean;
+  webhooksEnabled: boolean;
 }
 
 export default function StoresPage() {
@@ -300,6 +301,30 @@ export default function StoresPage() {
     } finally {
       setBusy(null);
       setProgress(null);
+    }
+  }
+
+  async function enableWebhooks(id: string) {
+    setBusy(id);
+    setMsg(null);
+    try {
+      const r = await fetch("/api/shopify/webhook/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: id }),
+      }).then((x) => x.json());
+      setMsg({
+        id,
+        ok: !!r.ok,
+        text: r.ok
+          ? "✓ Đã bật tự động đồng bộ (webhook): đơn mới/cập nhật từ Shopify sẽ tự về, không cần bấm Sync."
+          : `✗ ${r.error ?? "Không bật được webhook"}`,
+      });
+      await load();
+    } catch (e) {
+      setMsg({ id, ok: false, text: `✗ ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -483,13 +508,16 @@ export default function StoresPage() {
                   <Td className="font-medium text-slate-800">{s.name}</Td>
                   <Td className="text-slate-500">{s.shopifyDomain || "—"}</Td>
                   <Td>
-                    {s.hasClientCreds ? (
-                      <Badge tone="green">Có Client ID/Secret</Badge>
-                    ) : s.hasToken ? (
-                      <Badge tone="green">Có token (cũ)</Badge>
-                    ) : (
-                      <Badge tone="amber">Chưa có khoá</Badge>
-                    )}
+                    <div className="flex flex-wrap items-center gap-1">
+                      {s.hasClientCreds ? (
+                        <Badge tone="green">Có Client ID/Secret</Badge>
+                      ) : s.hasToken ? (
+                        <Badge tone="green">Có token (cũ)</Badge>
+                      ) : (
+                        <Badge tone="amber">Chưa có khoá</Badge>
+                      )}
+                      {s.webhooksEnabled && <Badge tone="blue">🔔 Tự động</Badge>}
+                    </div>
                   </Td>
                   <Td className="text-slate-500">
                     {s.lastSyncedAt
@@ -519,6 +547,18 @@ export default function StoresPage() {
                         disabled={!!busy || !(s.hasToken || s.hasClientCreds)}
                       >
                         {busy === s.id ? "..." : "Sync"}
+                      </Button>
+                      <Button
+                        variant={s.webhooksEnabled ? "secondary" : "primary"}
+                        onClick={() => enableWebhooks(s.id)}
+                        disabled={!!busy || !s.hasClientCreds}
+                        title={
+                          s.webhooksEnabled
+                            ? "Tự động đang bật — bấm để đăng ký lại"
+                            : "Bật tự động đồng bộ đơn (webhook)"
+                        }
+                      >
+                        {s.webhooksEnabled ? "🔔 Đang bật" : "🔔 Tự động"}
                       </Button>
                       <Button
                         variant="ghost"

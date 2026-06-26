@@ -72,6 +72,7 @@ model Store {
   // Legacy admin custom-app token (shpat_...) — still accepted if present.
   shopifyToken      String?
   shopifyApiVersion String    @default("2025-01")
+  webhooksEnabled   Boolean   @default(false) // real-time order webhooks registered
   lastSyncedAt      DateTime?
   currency          String    @default("JPY")
   taxRate           Float     @default(0.10) // Japan consumption tax = 10%
