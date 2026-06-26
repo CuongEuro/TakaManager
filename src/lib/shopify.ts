@@ -360,46 +360,72 @@ export function normalizeOrder(
   };
 }
 
-export async function fetchOrdersSince(
+export interface OrdersPage {
+  orders: ShopifyOrderNorm[];
+  nextCursor: string | null;
+  hasNext: boolean;
+  usedJourney: boolean;
+}
+
+/** Fetch ONE page of orders from a cursor. Auto-falls back to the lighter query
+ *  (no customerJourneySummary) on access-denied or gateway/throttle errors. */
+export async function fetchOrdersPage(
   creds: ShopifyCreds,
   since: Date,
-  onPage?: (count: number, page: number) => void
-): Promise<ShopifyOrderNorm[]> {
+  cursor: string | null = null,
+  useJourney = true
+): Promise<OrdersPage> {
   const c = await resolveCreds(creds);
-  const out: ShopifyOrderNorm[] = [];
   const queryStr = `created_at:>=${since.toISOString()} status:any`;
-  let cursor: string | null = null;
-  let useJourney = true; // downgrade to basic query if protected data is denied
-  for (let page = 0; page < 200; page++) {
-    let data: OrdersResp;
-    try {
-      data = await shopifyGraphQL<OrdersResp>(
-        c,
-        useJourney ? ORDERS_QUERY : ORDERS_QUERY_BASIC,
-        { cursor, query: queryStr }
-      );
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
-      // Fall back to the lighter query (no customerJourneySummary) when:
-      //  - protected customer data isn't enabled (access error), OR
-      //  - the journey-heavy query keeps failing with a gateway/throttle error
-      //    (HTTP 5xx) — the journey field is the usual cause of 502/timeout.
-      const accessDenied = /customerJourney|protected|customer data|access denied|not approved|ACCESS_DENIED/i.test(m);
-      const gateway = /HTTP (429|5\d\d)|throttl/i.test(m);
-      if (useJourney && (accessDenied || gateway)) {
-        useJourney = false;
-        data = await shopifyGraphQL<OrdersResp>(c, ORDERS_QUERY_BASIC, {
-          cursor,
-          query: queryStr,
-        });
-      } else {
-        throw e;
-      }
+  let used = useJourney;
+
+  let data: OrdersResp;
+  try {
+    data = await shopifyGraphQL<OrdersResp>(
+      c,
+      used ? ORDERS_QUERY : ORDERS_QUERY_BASIC,
+      { cursor, query: queryStr }
+    );
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    // Fall back to the lighter query when protected data isn't enabled, or when
+    // the journey-heavy query keeps failing with a gateway/throttle error (the
+    // customerJourneySummary field is the usual cause of 502/timeout).
+    const accessDenied = /customerJourney|protected|customer data|access denied|not approved|ACCESS_DENIED/i.test(m);
+    const gateway = /HTTP (429|5\d\d)|throttl/i.test(m);
+    if (used && (accessDenied || gateway)) {
+      used = false;
+      data = await shopifyGraphQL<OrdersResp>(c, ORDERS_QUERY_BASIC, {
+        cursor,
+        query: queryStr,
+      });
+    } else {
+      throw e;
     }
-    for (const o of data.orders.nodes) out.push(normalizeOrder(o, useJourney));
-    onPage?.(out.length, page + 1);
-    if (!data.orders.pageInfo.hasNextPage) break;
-    cursor = data.orders.pageInfo.endCursor;
+  }
+
+  return {
+    orders: data.orders.nodes.map((o) => normalizeOrder(o, used)),
+    nextCursor: data.orders.pageInfo.endCursor,
+    hasNext: data.orders.pageInfo.hasNextPage,
+    usedJourney: used,
+  };
+}
+
+/** Fetch all orders since a date (loops fetchOrdersPage). Used by cron. */
+export async function fetchOrdersSince(
+  creds: ShopifyCreds,
+  since: Date
+): Promise<ShopifyOrderNorm[]> {
+  const out: ShopifyOrderNorm[] = [];
+  let cursor: string | null = null;
+  let useJourney = true;
+  for (let page = 0; page < 400; page++) {
+    const p = await fetchOrdersPage(creds, since, cursor, useJourney);
+    useJourney = p.usedJourney; // stay downgraded once we fall back
+    out.push(...p.orders);
+    if (!p.hasNext) break;
+    cursor = p.nextCursor;
   }
   return out;
 }

@@ -18,20 +18,28 @@ import {
 } from "@/components/ui";
 import { formatPercent } from "@/lib/format";
 
-interface SyncResultRow {
+interface SyncTotals {
   ok: boolean;
   products: number;
   orders: number;
   since: string;
-  error?: string;
-  storeName: string;
+  useJourney: boolean;
 }
 
 interface ProgressState {
   percent: number;
   message: string;
-  storeIndex?: number;
-  storeCount?: number;
+}
+
+interface PageResp {
+  ok: boolean;
+  since: string;
+  cursor: string | null;
+  hasNext: boolean;
+  pageProducts: number;
+  pageOrders: number;
+  useJourney: boolean;
+  error?: string;
 }
 
 function fmtDate(iso?: string) {
@@ -40,61 +48,57 @@ function fmtDate(iso?: string) {
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
 }
 
-/** POST to the NDJSON streaming sync endpoint, calling onProgress per event.
- *  Returns the final SyncResult[] (throws on transport/server error). */
-async function runSyncStream(
-  body: unknown,
+// Unknown total → asymptotic bar that approaches (but never hits) `cap` by page.
+function pagePct(page: number, cap = 92): number {
+  return Math.min(cap, Math.round(cap * (1 - Math.pow(0.78, page))));
+}
+
+/** Sync ONE store by looping the per-page endpoint until done. Each request is
+ *  small, so it can never hit the serverless time limit. `prefix` labels the
+ *  progress message (used when syncing several stores). */
+async function syncStorePaged(
+  storeId: string,
+  sincePayload: Record<string, unknown>,
+  prefix: string,
+  basePercent: number,
+  span: number,
   onProgress: (p: ProgressState) => void
-): Promise<SyncResultRow[]> {
-  const res = await fetch("/api/shopify/sync/stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok || !res.body) {
-    const e = await res.json().catch(() => ({}));
-    throw new Error(e.error ?? `HTTP ${res.status}`);
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let results: SyncResultRow[] | null = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      const msg = JSON.parse(line);
-      if (msg.type === "progress") {
-        onProgress({
-          percent: msg.overall ?? msg.percent ?? 0,
-          message:
-            msg.storeCount && msg.storeCount > 1
-              ? `[${msg.storeIndex}/${msg.storeCount}] ${msg.storeName}: ${msg.message}`
-              : msg.message,
-          storeIndex: msg.storeIndex,
-          storeCount: msg.storeCount,
-        });
-      } else if (msg.type === "result") {
-        results = msg.results;
-      } else if (msg.type === "error") {
-        throw new Error(msg.error);
-      }
+): Promise<SyncTotals> {
+  let cursor: string | null = null;
+  let since: string | undefined;
+  let useJourney = true;
+  let products = 0;
+  let orders = 0;
+  let page = 0;
+  // hard cap pages to avoid an infinite loop on a misbehaving cursor
+  for (page = 1; page <= 2000; page++) {
+    const body: Record<string, unknown> = cursor
+      ? { storeId, since, cursor, useJourney }
+      : { storeId, ...sincePayload };
+    const res = await fetch("/api/shopify/sync/page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error ?? `HTTP ${res.status}`);
     }
+    const r: PageResp = await res.json();
+    if (!r.ok) throw new Error(r.error ?? "Lỗi không xác định");
+
+    products += r.pageProducts;
+    orders += r.pageOrders;
+    since = r.since;
+    useJourney = r.useJourney;
+    cursor = r.cursor;
+
+    const pct = basePercent + Math.round((span * pagePct(page)) / 100);
+    onProgress({ percent: pct, message: `${prefix}đã xử lý ${orders} đơn…` });
+
+    if (!r.hasNext) break;
   }
-  // Stream closed without a result line → the server was likely cut off
-  // (serverless time limit). Tell the user to pick a shorter range.
-  if (results === null) {
-    throw new Error(
-      "Đồng bộ bị gián đoạn (có thể quá thời gian xử lý trên server). " +
-        "Hãy thử khoảng ngày ngắn hơn (1–7 ngày)."
-    );
-  }
-  return results;
+  return { ok: true, products, orders, since: since ?? "", useJourney };
 }
 
 interface Store {
@@ -207,21 +211,19 @@ export default function StoresPage() {
   async function sync(id: string) {
     setBusy(id);
     setMsg(null);
-    setProgress({ percent: 0, message: "Bắt đầu…" });
+    setProgress({ percent: 2, message: "Bắt đầu…" });
     try {
-      const results = await runSyncStream(
-        { storeId: id, ...sincePayload() },
-        (p) => setProgress(p)
+      const t = await syncStorePaged(id, sincePayload(), "", 2, 96, (p) =>
+        setProgress(p)
       );
-      const res = results[0];
+      setProgress({ percent: 100, message: "Hoàn tất" });
+      const attrNote = t.useJourney ? "" : " (chưa bật phân loại kênh)";
       setMsg({
         id,
-        ok: !!res?.ok,
-        text: res?.ok
-          ? `✓ Đã kéo ${res.products} sản phẩm & ${res.orders} đơn (${rangeLabel()}, từ ${fmtDate(
-              res.since
-            )} → hôm nay). Số liệu đã lên Dashboard.`
-          : `✗ ${res?.error ?? "Lỗi không xác định"}`,
+        ok: true,
+        text: `✓ Đã kéo ${t.products} sản phẩm & ${t.orders} đơn (${rangeLabel()}, từ ${fmtDate(
+          t.since
+        )} → hôm nay)${attrNote}. Số liệu đã lên Dashboard.`,
       });
       await load();
     } catch (e) {
@@ -235,18 +237,47 @@ export default function StoresPage() {
   async function syncAll() {
     setBusy("ALL");
     setMsg(null);
-    setProgress({ percent: 0, message: "Bắt đầu…" });
+    setProgress({ percent: 1, message: "Bắt đầu…" });
     try {
-      const results = await runSyncStream({ ...sincePayload() }, (p) =>
-        setProgress(p)
-      );
-      const okCount = results.filter((x) => x.ok).length;
-      const totProducts = results.reduce((s, x) => s + (x.products || 0), 0);
-      const totOrders = results.reduce((s, x) => s + (x.orders || 0), 0);
+      const eligible = items.filter((s) => s.hasToken || s.hasClientCreds);
+      if (eligible.length === 0) {
+        setMsg({ id: "ALL", ok: false, text: "✗ Chưa có store nào có khoá kết nối." });
+        return;
+      }
+      let okCount = 0;
+      let totProducts = 0;
+      let totOrders = 0;
+      const n = eligible.length;
+      for (let i = 0; i < n; i++) {
+        const s = eligible[i];
+        const base = Math.round((i * 100) / n);
+        const span = Math.round(100 / n);
+        try {
+          const t = await syncStorePaged(
+            s.id,
+            sincePayload(),
+            `[${i + 1}/${n}] ${s.name}: `,
+            base,
+            span,
+            (p) => setProgress(p)
+          );
+          okCount++;
+          totProducts += t.products;
+          totOrders += t.orders;
+        } catch (e) {
+          // keep going with the other stores; report at the end
+          setMsg({
+            id: "ALL",
+            ok: false,
+            text: `⚠️ ${s.name}: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
+      }
+      setProgress({ percent: 100, message: "Hoàn tất" });
       setMsg({
         id: "ALL",
         ok: okCount > 0,
-        text: `✓ Đồng bộ ${okCount}/${results.length} store — tổng ${totProducts} sản phẩm, ${totOrders} đơn (${rangeLabel()}). Xem ở Dashboard.`,
+        text: `✓ Đồng bộ ${okCount}/${n} store — tổng ${totProducts} sản phẩm, ${totOrders} đơn (${rangeLabel()}). Xem ở Dashboard.`,
       });
       await load();
     } catch (e) {
