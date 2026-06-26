@@ -367,6 +367,26 @@ export interface OrdersPage {
   usedJourney: boolean;
 }
 
+/** Total number of orders in the window — best-effort, for an accurate progress
+ *  bar. Returns null if the API/version doesn't support ordersCount. */
+export async function fetchOrdersCount(
+  creds: ShopifyCreds,
+  since: Date
+): Promise<number | null> {
+  try {
+    const c = await resolveCreds(creds);
+    const queryStr = `created_at:>=${since.toISOString()} status:any`;
+    const data = await shopifyGraphQL<{ ordersCount: { count: number } }>(
+      c,
+      `query OrdersCount($query: String) { ordersCount(query: $query) { count } }`,
+      { query: queryStr }
+    );
+    return data.ordersCount?.count ?? null;
+  } catch {
+    return null; // count is optional — never fail the sync over it
+  }
+}
+
 /** Fetch ONE page of orders from a cursor. Auto-falls back to the lighter query
  *  (no customerJourneySummary) on access-denied or gateway/throttle errors. */
 export async function fetchOrdersPage(

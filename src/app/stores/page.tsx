@@ -39,6 +39,7 @@ interface PageResp {
   pageProducts: number;
   pageOrders: number;
   useJourney: boolean;
+  total: number | null;
   error?: string;
 }
 
@@ -70,8 +71,9 @@ async function syncStorePaged(
   let products = 0;
   let orders = 0;
   let page = 0;
+  let total: number | null = null;
   // hard cap pages to avoid an infinite loop on a misbehaving cursor
-  for (page = 1; page <= 2000; page++) {
+  for (page = 1; page <= 4000; page++) {
     const body: Record<string, unknown> = cursor
       ? { storeId, since, cursor, useJourney }
       : { storeId, ...sincePayload };
@@ -98,9 +100,16 @@ async function syncStorePaged(
     since = r.since;
     useJourney = r.useJourney;
     cursor = r.cursor;
+    if (r.total != null) total = r.total;
 
-    const pct = basePercent + Math.round((span * pagePct(page)) / 100);
-    onProgress({ percent: pct, message: `${prefix}đã xử lý ${orders} đơn…` });
+    // Accurate fraction when we know the total; otherwise an asymptotic estimate.
+    const fraction =
+      total && total > 0
+        ? Math.min(0.99, orders / total)
+        : pagePct(page) / 100;
+    const pct = basePercent + Math.round(span * fraction);
+    const totalNote = total && total > 0 ? `/${total}` : "";
+    onProgress({ percent: pct, message: `${prefix}đã xử lý ${orders}${totalNote} đơn…` });
 
     if (!r.hasNext) break;
   }

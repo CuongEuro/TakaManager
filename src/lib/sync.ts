@@ -12,6 +12,7 @@
 import { prisma } from "@/lib/prisma";
 import {
   fetchOrdersPage,
+  fetchOrdersCount,
   fetchOrdersSince,
   ShopifyCreds,
   ShopifyOrderNorm,
@@ -160,6 +161,7 @@ export interface SyncPageResult {
   pageProducts: number; // distinct products upserted on this page
   pageOrders: number; // orders upserted on this page
   useJourney: boolean; // whether channel attribution was available
+  total: number | null; // total orders in window (only on the first page)
   error?: string;
 }
 
@@ -180,6 +182,7 @@ export async function syncStorePage(
     pageProducts: 0,
     pageOrders: 0,
     useJourney: opts.useJourney ?? true,
+    total: null as number | null,
   };
   if (!creds) {
     return {
@@ -191,6 +194,9 @@ export async function syncStorePage(
 
   const since = resolveSince(opts, store!.lastSyncedAt);
   try {
+    // On the first page (no cursor) also ask Shopify the total for an accurate bar.
+    const total = opts.cursor ? null : await fetchOrdersCount(creds, since);
+
     const page = await fetchOrdersPage(
       creds,
       since,
@@ -216,6 +222,7 @@ export async function syncStorePage(
       pageProducts: productMap.size,
       pageOrders: page.orders.length,
       useJourney: page.usedJourney,
+      total,
     };
   } catch (e) {
     return {
