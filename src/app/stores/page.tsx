@@ -46,15 +46,42 @@ export default function StoresPage() {
   );
 
   async function add() {
-    if (!form.name.trim()) return;
-    await create({
-      name: form.name.trim(),
-      shopifyDomain: form.domain.trim() || null,
-      shopifyClientId: form.clientId.trim() || null,
-      shopifyClientSecret: form.clientSecret.trim() || null,
-      taxRate: Number(form.taxRate) / 100,
-    });
-    setForm({ name: "", domain: "", clientId: "", clientSecret: "", taxRate: "10" });
+    // Cho phép bỏ trống Tên store → lấy tạm theo domain.
+    const name = form.name.trim() || form.domain.trim();
+    if (!name) {
+      setMsg({ id: "ADD", ok: false, text: "✗ Nhập ít nhất Tên store hoặc Domain." });
+      return;
+    }
+    setBusy("ADD");
+    setMsg(null);
+    try {
+      const r = await create({
+        name,
+        shopifyDomain: form.domain.trim() || null,
+        shopifyClientId: form.clientId.trim() || null,
+        shopifyClientSecret: form.clientSecret.trim() || null,
+        taxRate: Number(form.taxRate) / 100,
+      });
+      if (r && !r.ok) {
+        const e = await r.json().catch(() => ({}));
+        setMsg({
+          id: "ADD",
+          ok: false,
+          text: `✗ Không tạo được store (HTTP ${r.status}): ${e.error ?? "lỗi không xác định"}`,
+        });
+        return;
+      }
+      setMsg({ id: "ADD", ok: true, text: `✓ Đã thêm store "${name}".` });
+      setForm({ name: "", domain: "", clientId: "", clientSecret: "", taxRate: "10" });
+    } catch (err) {
+      setMsg({
+        id: "ADD",
+        ok: false,
+        text: `✗ Lỗi mạng: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function testConn(id: string) {
@@ -197,7 +224,9 @@ export default function StoresPage() {
             />
           </Field>
           <div className="flex items-end">
-            <Button onClick={add}>+ Thêm store</Button>
+            <Button onClick={add} disabled={busy === "ADD"}>
+              {busy === "ADD" ? "Đang thêm..." : "+ Thêm store"}
+            </Button>
           </div>
         </div>
         <div className="mt-3 space-y-1 text-xs text-slate-400">

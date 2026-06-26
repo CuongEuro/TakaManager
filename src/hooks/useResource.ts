@@ -22,24 +22,26 @@ export function useResource<T>(url: string) {
 
   const create = useCallback(
     async (body: unknown) => {
-      await fetch(url, {
+      const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       await load();
+      return r;
     },
     [url, load]
   );
 
   const update = useCallback(
     async (id: string, body: unknown) => {
-      await fetch(`${url}/${id}`, {
+      const r = await fetch(`${url}/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       await load();
+      return r;
     },
     [url, load]
   );
