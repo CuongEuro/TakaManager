@@ -111,35 +111,63 @@ function num(v: unknown): number {
   return isNaN(n) ? 0 : n;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Transient HTTP statuses worth retrying (gateway hiccups + rate limit).
+const RETRYABLE = new Set([429, 500, 502, 503, 504, 520, 522, 524]);
+
 export async function shopifyGraphQL<T>(
   creds: ShopifyCreds,
   query: string,
   variables: Record<string, unknown> = {}
 ): Promise<T> {
-  const res = await fetch(endpoint(creds), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": creds.shopifyToken ?? "",
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  const url = endpoint(creds);
+  const maxAttempts = 4;
+  let lastErr = "";
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Shopify HTTP ${res.status}: ${text.slice(0, 300)}`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": creds.shopifyToken ?? "",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      lastErr = `Shopify HTTP ${res.status}: ${text.slice(0, 200)}`;
+      // Retry transient gateway/rate-limit errors with exponential backoff.
+      if (RETRYABLE.has(res.status) && attempt < maxAttempts) {
+        await sleep(800 * 2 ** (attempt - 1));
+        continue;
+      }
+      throw new Error(lastErr);
+    }
+
+    const json = (await res.json()) as {
+      data?: T;
+      errors?: { message: string; extensions?: { code?: string } }[];
+    };
+
+    if (json.errors?.length) {
+      const throttled = json.errors.some(
+        (e) => e.extensions?.code === "THROTTLED" || /throttl/i.test(e.message)
+      );
+      lastErr = `Shopify GraphQL error: ${json.errors.map((e) => e.message).join("; ")}`;
+      if (throttled && attempt < maxAttempts) {
+        await sleep(1500 * attempt); // give the cost bucket time to refill
+        continue;
+      }
+      throw new Error(lastErr);
+    }
+
+    if (!json.data) throw new Error("Shopify: empty response");
+    return json.data;
   }
-  const json = (await res.json()) as {
-    data?: T;
-    errors?: { message: string }[];
-  };
-  if (json.errors?.length) {
-    throw new Error(
-      `Shopify GraphQL error: ${json.errors.map((e) => e.message).join("; ")}`
-    );
-  }
-  if (!json.data) throw new Error("Shopify: empty response");
-  return json.data;
+
+  throw new Error(lastErr || "Shopify: hết lượt thử lại");
 }
 
 /** Test the connection — returns shop name + currency. */
@@ -161,7 +189,7 @@ export async function testConnection(
 // own store, enable it under the app's "Protected customer data access" (quick toggle).
 const ORDERS_QUERY = `
 query Orders($cursor: String, $query: String) {
-  orders(first: 50, after: $cursor, query: $query, sortKey: CREATED_AT) {
+  orders(first: 25, after: $cursor, query: $query, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -178,7 +206,7 @@ query Orders($cursor: String, $query: String) {
           utmParameters { source medium campaign }
         }
       }
-      lineItems(first: 100) {
+      lineItems(first: 50) {
         nodes {
           title
           quantity
@@ -195,7 +223,7 @@ query Orders($cursor: String, $query: String) {
 // just without per-order channel attribution).
 const ORDERS_QUERY_BASIC = `
 query Orders($cursor: String, $query: String) {
-  orders(first: 50, after: $cursor, query: $query, sortKey: CREATED_AT) {
+  orders(first: 25, after: $cursor, query: $query, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -204,7 +232,7 @@ query Orders($cursor: String, $query: String) {
       totalDiscountsSet { shopMoney { amount } }
       totalTaxSet { shopMoney { amount } }
       totalShippingPriceSet { shopMoney { amount } }
-      lineItems(first: 100) {
+      lineItems(first: 50) {
         nodes {
           title
           quantity
@@ -352,8 +380,13 @@ export async function fetchOrdersSince(
       );
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      // Protected customer data not enabled → retry this page without journey.
-      if (useJourney && /customerJourney|protected|customer data|access denied|not approved|ACCESS_DENIED/i.test(m)) {
+      // Fall back to the lighter query (no customerJourneySummary) when:
+      //  - protected customer data isn't enabled (access error), OR
+      //  - the journey-heavy query keeps failing with a gateway/throttle error
+      //    (HTTP 5xx) — the journey field is the usual cause of 502/timeout.
+      const accessDenied = /customerJourney|protected|customer data|access denied|not approved|ACCESS_DENIED/i.test(m);
+      const gateway = /HTTP (429|5\d\d)|throttl/i.test(m);
+      if (useJourney && (accessDenied || gateway)) {
         useJourney = false;
         data = await shopifyGraphQL<OrdersResp>(c, ORDERS_QUERY_BASIC, {
           cursor,
