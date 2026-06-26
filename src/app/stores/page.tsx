@@ -1,0 +1,254 @@
+"use client";
+
+import { useState } from "react";
+import { useResource } from "@/hooks/useResource";
+import {
+  PageHeader,
+  Card,
+  Button,
+  Input,
+  Field,
+  Table,
+  Th,
+  Td,
+  Badge,
+  EmptyState,
+} from "@/components/ui";
+import { formatPercent } from "@/lib/format";
+
+interface Store {
+  id: string;
+  name: string;
+  shopifyDomain: string | null;
+  shopifyApiVersion: string;
+  currency: string;
+  taxRate: number;
+  active: boolean;
+  lastSyncedAt: string | null;
+  hasToken: boolean;
+}
+
+export default function StoresPage() {
+  const { items, loading, create, update, remove, load } =
+    useResource<Store>("/api/stores");
+  const [form, setForm] = useState({ name: "", domain: "", token: "", taxRate: "10" });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ id: string; text: string; ok: boolean } | null>(
+    null
+  );
+
+  async function add() {
+    if (!form.name.trim()) return;
+    await create({
+      name: form.name.trim(),
+      shopifyDomain: form.domain.trim() || null,
+      shopifyToken: form.token.trim() || null,
+      taxRate: Number(form.taxRate) / 100,
+    });
+    setForm({ name: "", domain: "", token: "", taxRate: "10" });
+  }
+
+  async function testConn(id: string) {
+    setBusy(id);
+    setMsg(null);
+    try {
+      const r = await fetch("/api/shopify/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: id }),
+      }).then((x) => x.json());
+      setMsg({
+        id,
+        ok: r.ok,
+        text: r.ok
+          ? `✓ Kết nối OK: ${r.shop.name} (${r.shop.currencyCode})`
+          : `✗ ${r.error}`,
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function sync(id: string) {
+    setBusy(id);
+    setMsg(null);
+    try {
+      const r = await fetch("/api/shopify/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: id }),
+      }).then((x) => x.json());
+      const res = r.results?.[0];
+      setMsg({
+        id,
+        ok: !!res?.ok,
+        text: res?.ok
+          ? `✓ Đã đồng bộ ${res.products} sản phẩm, ${res.orders} đơn.`
+          : `✗ ${res?.error ?? r.error ?? "Lỗi không xác định"}`,
+      });
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function syncAll() {
+    setBusy("ALL");
+    setMsg(null);
+    try {
+      const r = await fetch("/api/shopify/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }).then((x) => x.json());
+      const okCount = (r.results ?? []).filter((x: { ok: boolean }) => x.ok).length;
+      setMsg({
+        id: "ALL",
+        ok: okCount > 0,
+        text: `Đồng bộ xong ${okCount}/${r.results?.length ?? 0} store.`,
+      });
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setToken(id: string) {
+    const token = window.prompt("Dán Shopify Admin API access token (shpat_...):");
+    if (token === null) return;
+    await update(id, { shopifyToken: token.trim() });
+  }
+
+  return (
+    <div>
+      <PageHeader
+        title="Stores"
+        subtitle="Kết nối Shopify để tự động đồng bộ đơn hàng, sản phẩm & doanh thu."
+        actions={
+          <Button onClick={syncAll} disabled={busy === "ALL"}>
+            {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
+          </Button>
+        }
+      />
+
+      {msg && (
+        <div
+          className={`mb-4 rounded-lg px-4 py-2 text-sm ${
+            msg.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+          }`}
+        >
+          {msg.text}
+        </div>
+      )}
+
+      <Card className="mb-6">
+        <div className="grid gap-3 md:grid-cols-[1fr_1fr_1.4fr_90px_auto] md:items-end">
+          <Field label="Tên store">
+            <Input
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="VD: Taka Store JP"
+            />
+          </Field>
+          <Field label="Shopify domain">
+            <Input
+              value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })}
+              placeholder="my-shop.myshopify.com"
+            />
+          </Field>
+          <Field label="Admin API token (shpat_...)">
+            <Input
+              value={form.token}
+              onChange={(e) => setForm({ ...form, token: e.target.value })}
+              placeholder="tuỳ chọn — có thể thêm sau"
+            />
+          </Field>
+          <Field label="Thuế (%)">
+            <Input
+              type="number"
+              value={form.taxRate}
+              onChange={(e) => setForm({ ...form, taxRate: e.target.value })}
+            />
+          </Field>
+          <Button onClick={add}>+ Thêm</Button>
+        </div>
+        <p className="mt-3 text-xs text-slate-400">
+          💡 Tạo <b>Custom app</b> trong Shopify Admin → Settings → Apps → Develop
+          apps → cấp quyền <code>read_orders</code>, <code>read_products</code>,
+          <code> read_inventory</code> → Install → copy Admin API access token.
+        </p>
+      </Card>
+
+      <Card>
+        {loading ? (
+          <EmptyState message="Đang tải..." />
+        ) : items.length === 0 ? (
+          <EmptyState message="Chưa có store nào." />
+        ) : (
+          <Table>
+            <thead>
+              <tr>
+                <Th>Tên</Th>
+                <Th>Domain</Th>
+                <Th>Kết nối</Th>
+                <Th>Đồng bộ lần cuối</Th>
+                <Th>Thuế</Th>
+                <Th className="text-right">Thao tác</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((s) => (
+                <tr key={s.id}>
+                  <Td className="font-medium text-slate-800">{s.name}</Td>
+                  <Td className="text-slate-500">{s.shopifyDomain || "—"}</Td>
+                  <Td>
+                    {s.hasToken ? (
+                      <Badge tone="green">Có token</Badge>
+                    ) : (
+                      <Badge tone="amber">Chưa có token</Badge>
+                    )}
+                  </Td>
+                  <Td className="text-slate-500">
+                    {s.lastSyncedAt
+                      ? new Date(s.lastSyncedAt).toLocaleString("vi-VN")
+                      : "—"}
+                  </Td>
+                  <Td>{formatPercent(s.taxRate)}</Td>
+                  <Td className="text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button variant="secondary" onClick={() => setToken(s.id)}>
+                        🔑
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() => testConn(s.id)}
+                        disabled={busy === s.id || !s.hasToken}
+                      >
+                        Test
+                      </Button>
+                      <Button
+                        onClick={() => sync(s.id)}
+                        disabled={busy === s.id || !s.hasToken}
+                      >
+                        {busy === s.id ? "..." : "Sync"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          if (confirm(`Xóa store "${s.name}"?`)) remove(s.id);
+                        }}
+                      >
+                        🗑️
+                      </Button>
+                    </div>
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </Card>
+    </div>
+  );
+}

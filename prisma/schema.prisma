@@ -1,0 +1,330 @@
+// TakaManager — Prisma schema (Phase 1: Finance / P&L)
+// DB: SQLite for local dev. For cloud, change provider to "postgresql" and
+// (optionally) convert the documented String fields below into native enums.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// AUTH & MULTI-TENANCY
+// A User signs in; an Organization (workspace) owns all business data; a
+// Membership links users to orgs. All data models carry organizationId so
+// every query is isolated per workspace.
+// ---------------------------------------------------------------------------
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String?
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  memberships  Membership[]
+}
+
+model Organization {
+  id         String   @id @default(cuid())
+  name       String
+  inviteCode String   @unique // teammates join the workspace with this code
+  createdAt  DateTime @default(now())
+
+  memberships Membership[]
+  stores      Store[]
+  fixedCosts  FixedCost[]
+  costRules   CostRule[]
+  adSpends    AdSpend[]
+  products    Product[]
+  orders      Order[]
+  adAccounts  AdAccount[]
+  adEntities  AdEntity[]
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role           String       @default("MEMBER") // OWNER | ADMIN | MEMBER
+  createdAt      DateTime     @default(now())
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// Store: one Shopify store. Costs & revenue roll up per store, then to company.
+// ---------------------------------------------------------------------------
+model Store {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name              String
+  shopifyDomain     String? // e.g. "my-shop.myshopify.com"
+  shopifyToken      String? // Admin API access token (shpat_...) — Phase 2
+  shopifyApiVersion String    @default("2025-01")
+  lastSyncedAt      DateTime?
+  currency          String    @default("JPY")
+  taxRate           Float     @default(0.10) // Japan consumption tax = 10%
+  active            Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  fixedCosts FixedCost[]
+  costRules  CostRule[]
+  adSpends   AdSpend[]
+  orders     Order[]
+  products   Product[]
+  adAccounts AdAccount[]
+
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// AdAccount: credentials to pull spend from an ad platform (Phase 3).
+// storeId null = shared / company-level account.
+// Secrets are stored here for local dev; on cloud use a secrets manager.
+// ---------------------------------------------------------------------------
+model AdAccount {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store        Store?    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  platform     String    // FACEBOOK | GOOGLE | TWITTER
+  name         String
+  externalId   String    // ad account id: act_xxx / Google customer id / X account id
+  active       Boolean   @default(true)
+  lastSyncedAt DateTime?
+
+  // Meta: accessToken. X: accessToken + accessSecret + apiKey + apiSecret.
+  accessToken    String?
+  accessSecret   String?
+  apiKey         String?
+  apiSecret      String?
+  // Google Ads OAuth
+  refreshToken    String?
+  clientId        String?
+  clientSecret    String?
+  developerToken  String?
+  loginCustomerId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entities AdEntity[]
+
+  @@index([organizationId])
+  @@index([storeId])
+  @@index([platform])
+}
+
+// ---------------------------------------------------------------------------
+// AdEntity: the ad hierarchy node — Campaign or AdSet (Meta ad set / Google ad
+// group / X line item). parentExternalId links an adset to its campaign.
+// ---------------------------------------------------------------------------
+model AdEntity {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  accountId        String
+  account          AdAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  storeId          String?
+  platform         String     // FACEBOOK | GOOGLE | TWITTER
+  level            String     // CAMPAIGN | ADSET
+  externalId       String
+  name             String
+  status           String?    // ACTIVE | PAUSED | ...
+  parentExternalId String?    // parent entity's externalId (null for campaigns)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  metrics AdMetric[]
+
+  @@unique([accountId, externalId])
+  @@index([organizationId])
+  @@index([accountId])
+  @@index([level])
+  @@index([parentExternalId])
+}
+
+// Daily metrics for one AdEntity.
+model AdMetric {
+  id          String   @id @default(cuid())
+  entityId    String
+  entity      AdEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  date        DateTime
+  spend       Float    @default(0)
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  conversions Float    @default(0)
+  revenue     Float    @default(0)
+
+  @@unique([entityId, date])
+  @@index([date])
+}
+
+// ---------------------------------------------------------------------------
+// 1) FIXED COSTS (Chi phí cố định): Shopify / Klaviyo / Line / facility ...
+//    storeId null = company-wide (allocated across stores by revenue share).
+// ---------------------------------------------------------------------------
+model FixedCost {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store        Store?    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  category     String    // SHOPIFY | KLAVIYO | LINE | FACILITY | OTHER
+  name         String
+  amount       Float
+  billingCycle String    @default("MONTHLY") // MONTHLY | YEARLY | ONE_TIME
+  startDate    DateTime  @default(now())
+  endDate      DateTime?
+  note         String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([organizationId])
+  @@index([storeId])
+  @@index([category])
+}
+
+// ---------------------------------------------------------------------------
+// 2) VARIABLE COSTS A (Chi phí biến đổi A): production / fulfillment rules.
+//    COGS basecost, selling fee, shipping, ink, personnel, packaging.
+//    Modeled as rules so they auto-apply to orders for P&L.
+//    storeId null = applies to all stores; productId null = all products.
+// ---------------------------------------------------------------------------
+model CostRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store      Store?   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId  String?
+  product    Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  type       String   // COGS | SELLING_FEE | SHIPPING | INK | PERSONNEL | PACKAGING | OTHER
+  calcMethod String   @default("PER_UNIT") // PER_UNIT | PER_ORDER | PERCENT_OF_REVENUE
+  amount     Float    // fixed amount OR fraction (0.029 = 2.9%) when PERCENT_OF_REVENUE
+  active     Boolean  @default(true)
+  note       String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([storeId])
+  @@index([productId])
+  @@index([type])
+}
+
+// ---------------------------------------------------------------------------
+// 3) VARIABLE COSTS B (Chi phí biến đổi B): advertising spend per day.
+//    Manual now; auto-filled from Meta/Google/X APIs in Phase 3.
+// ---------------------------------------------------------------------------
+model AdSpend {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store        Store?   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  platform     String   // FACEBOOK | GOOGLE | TWITTER | OTHER
+  date         DateTime // the day this spend belongs to
+  campaignName String?
+  spend        Float    @default(0)
+  impressions  Int      @default(0)
+  clicks       Int      @default(0)
+  conversions  Int      @default(0)
+  revenue      Float    @default(0) // platform-attributed revenue (for ROAS)
+  source       String   @default("MANUAL") // MANUAL | API
+  // Deterministic key for API rows (encodes nulls) → DB-enforced de-dup on re-sync.
+  // Null for MANUAL rows (user may intentionally add several), so they never collide.
+  dedupeKey    String?  @unique
+  note         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([storeId])
+  @@index([platform])
+  @@index([date])
+}
+
+// ---------------------------------------------------------------------------
+// Product (Phase 2 from Shopify; manual now). Holds basecost & image.
+// ---------------------------------------------------------------------------
+model Product {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String
+  store          Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  externalId     String?  // Shopify product/variant id
+  title      String
+  image      String?
+  catalog    String?  // main collection/catalog title (for "đến từ catalog nào")
+  baseCost   Float    @default(0) // COGS per unit (overrides COGS CostRule when set)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  costRules CostRule[]
+  lineItems OrderLineItem[]
+
+  @@unique([storeId, externalId])
+  @@index([organizationId])
+  @@index([storeId])
+}
+
+// ---------------------------------------------------------------------------
+// Order + line items (Phase 2 from Shopify; manual/seed now).
+// Drives revenue and best-seller analytics.
+// ---------------------------------------------------------------------------
+model Order {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId         String
+  store           Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  externalId      String?  // Shopify order id
+  date            DateTime
+  grossRevenue    Float    @default(0) // product subtotal before tax
+  discounts       Float    @default(0)
+  tax             Float    @default(0)
+  shippingCharged Float    @default(0) // shipping paid by customer
+  itemsCount      Int      @default(0)
+  source          String   @default("MANUAL") // MANUAL | API
+  // --- attribution (for ad optimization) ---
+  channel         String?  // FACEBOOK | GOOGLE | TWITTER | KLAVIYO | DIRECT | ORGANIC | REFERRAL | OTHER
+  utmSource       String?
+  utmMedium       String?
+  utmCampaign     String?
+  sourceName      String?  // Shopify sales channel (web, pos, ...)
+  createdAt       DateTime @default(now())
+
+  lineItems OrderLineItem[]
+
+  @@unique([storeId, externalId])
+  @@index([organizationId])
+  @@index([storeId])
+  @@index([date])
+  @@index([channel])
+}
+
+model OrderLineItem {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  title     String
+  image     String?
+  quantity  Int      @default(1)
+  price     Float    @default(0) // unit price
+
+  @@index([orderId])
+  @@index([productId])
+}
