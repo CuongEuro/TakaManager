@@ -36,7 +36,7 @@ const PRESETS: RangePreset[] = [
 ];
 
 export default function DashboardPage() {
-  const [preset, setPreset] = useState<RangePreset>("thisMonth");
+  const [preset, setPreset] = useState<RangePreset>("today");
   const [storeId, setStoreId] = useState<string>("");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);

@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const sp = req.nextUrl.searchParams;
-  const preset = (sp.get("preset") ?? "thisMonth") as RangePreset;
+  const preset = (sp.get("preset") ?? "today") as RangePreset;
   const storeId = sp.get("storeId") || undefined;
 
   // Day boundaries follow the store's timezone (default Japan). For "all stores"
