@@ -94,11 +94,23 @@ export default function DashboardPage() {
       />
 
       {loading && !data ? (
-        <EmptyState message="Đang tải dữ liệu..." />
+        <DashboardSkeleton />
       ) : !s ? (
         <EmptyState message="Chưa có dữ liệu." />
       ) : (
-        <div className="space-y-6">
+        <div className="relative">
+          {loading && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-start justify-center pt-24">
+              <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm">
+                <Spinner /> Đang tải dữ liệu…
+              </div>
+            </div>
+          )}
+          <div
+            className={`space-y-6 transition-opacity duration-200 ${
+              loading ? "opacity-40" : "opacity-100"
+            }`}
+          >
           {/* KPI cards */}
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <StatCard
@@ -394,8 +406,47 @@ export default function DashboardPage() {
               </div>
             )}
           </Card>
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg className="h-4 w-4 animate-spin text-brand-600" viewBox="0 0 24 24" fill="none">
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+      />
+    </svg>
+  );
+}
+
+// Skeleton shown only on the very first load (before any data exists).
+function DashboardSkeleton() {
+  return (
+    <div className="animate-pulse space-y-6">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="h-24 rounded-xl border border-slate-200 bg-slate-100" />
+        ))}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="h-72 rounded-xl border border-slate-200 bg-slate-100 lg:col-span-2" />
+        <div className="h-72 rounded-xl border border-slate-200 bg-slate-100" />
+      </div>
+      <div className="h-40 rounded-xl border border-slate-200 bg-slate-100" />
     </div>
   );
 }
