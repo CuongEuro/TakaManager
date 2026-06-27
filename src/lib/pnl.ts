@@ -3,7 +3,7 @@
 // Pure-ish: fetches data for a [start, end) range, computes everything in memory.
 // ---------------------------------------------------------------------------
 import { prisma } from "@/lib/prisma";
-import { isoDay } from "@/lib/dates";
+import { isoDay, DEFAULT_TZ } from "@/lib/dates";
 
 const DAYS_PER_MONTH = 365.25 / 12; // 30.4375
 const DAYS_PER_YEAR = 365.25;
@@ -13,6 +13,7 @@ export interface PnlInput {
   start: Date;
   end: Date; // exclusive
   storeId?: string | null; // null/undefined = all stores
+  timezone?: string; // IANA tz for daily bucketing (default Asia/Tokyo)
 }
 
 export interface RevenueBlock {
@@ -234,6 +235,7 @@ export async function computeDashboard(
   input: PnlInput
 ): Promise<DashboardData> {
   const { organizationId, start, end, storeId } = input;
+  const tz = input.timezone ?? DEFAULT_TZ;
   const storeFilter = storeId ? { storeId } : {};
 
   const [orders, rules, adSpends, fixedCosts, allStores] = await Promise.all([
@@ -274,7 +276,7 @@ export async function computeDashboard(
       : null,
   });
 
-  const daily = buildDailySeries(start, end, orders, adSpends, rules, fixedCosts, storeId ?? null, summary.fixed.total);
+  const daily = buildDailySeries(start, end, orders, adSpends, rules, fixedCosts, storeId ?? null, summary.fixed.total, tz);
   const stores = buildStoreBreakdown(allStores, orders, adSpends, rules);
   const bestSellers = buildBestSellers(orders);
   const channels = buildChannelBreakdown(orders);
@@ -513,12 +515,13 @@ function buildDailySeries(
   rules: Rule[],
   _fixedCosts: unknown,
   _storeId: string | null,
-  fixedTotal: number
+  fixedTotal: number,
+  tz: string = DEFAULT_TZ
 ): DailyPoint[] {
-  // bucket by day
+  // bucket by day (in the store timezone)
   const days: string[] = [];
   for (let t = start.getTime(); t < end.getTime(); t += 86400000) {
-    days.push(isoDay(new Date(t)));
+    days.push(isoDay(new Date(t), tz));
   }
   const fixedPerDay = days.length > 0 ? fixedTotal / days.length : 0;
 
@@ -529,7 +532,7 @@ function buildDailySeries(
   // group orders by day to compute variable A per day
   const ordersByDay: Record<string, OrderWithItems[]> = {};
   for (const o of orders) {
-    const d = isoDay(o.date);
+    const d = isoDay(o.date, tz);
     (ordersByDay[d] ??= []).push(o);
   }
   for (const d of Object.keys(ordersByDay)) {
@@ -541,7 +544,7 @@ function buildDailySeries(
     map[d].netProfit = rev - varA; // ads & fixed subtracted below
   }
   for (const a of adSpends) {
-    const d = isoDay(a.date);
+    const d = isoDay(a.date, tz);
     if (!map[d]) continue;
     map[d].adSpend += a.spend;
   }

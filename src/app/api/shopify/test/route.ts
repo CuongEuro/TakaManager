@@ -47,6 +47,13 @@ export async function POST(req: NextRequest) {
 
   try {
     const shop = await testConnection(creds);
+    // Persist the store's real timezone so the dashboard buckets days correctly.
+    if (b.storeId && shop.ianaTimezone) {
+      await prisma.store.updateMany({
+        where: { id: String(b.storeId), organizationId: session.oid },
+        data: { timezone: shop.ianaTimezone },
+      });
+    }
     return NextResponse.json({ ok: true, shop });
   } catch (e) {
     return NextResponse.json({

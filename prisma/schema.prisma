@@ -75,6 +75,7 @@ model Store {
   webhooksEnabled   Boolean   @default(false) // real-time order webhooks registered
   lastSyncedAt      DateTime?
   currency          String    @default("JPY")
+  timezone          String    @default("Asia/Tokyo") // IANA tz from Shopify (shop.ianaTimezone)
   taxRate           Float     @default(0.10) // Japan consumption tax = 10%
   active            Boolean   @default(true)
   createdAt         DateTime  @default(now())

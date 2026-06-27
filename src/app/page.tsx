@@ -22,6 +22,7 @@ interface DashboardResponse extends DashboardData {
   preset: RangePreset;
   storeId: string | null;
   storeOptions: { id: string; name: string }[];
+  timezone: string;
 }
 
 const PRESETS: RangePreset[] = [
@@ -58,7 +59,9 @@ export default function DashboardPage() {
     <div>
       <PageHeader
         title="Dashboard Lợi nhuận"
-        subtitle="Tổng quan doanh thu, chi phí và lợi nhuận theo thời gian."
+        subtitle={`Tổng quan doanh thu, chi phí & lợi nhuận theo thời gian — múi giờ ${
+          data?.timezone ?? "Asia/Tokyo"
+        }.`}
         actions={
           <div className="flex items-center gap-2">
             <div className="flex rounded-lg border border-slate-200 bg-white p-1">

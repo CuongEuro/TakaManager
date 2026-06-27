@@ -174,11 +174,11 @@ export async function shopifyGraphQL<T>(
 /** Test the connection — returns shop name + currency. */
 export async function testConnection(
   creds: ShopifyCreds
-): Promise<{ name: string; currencyCode: string }> {
+): Promise<{ name: string; currencyCode: string; ianaTimezone: string | null }> {
   const c = await resolveCreds(creds);
   const data = await shopifyGraphQL<{
-    shop: { name: string; currencyCode: string };
-  }>(c, `{ shop { name currencyCode } }`);
+    shop: { name: string; currencyCode: string; ianaTimezone: string | null };
+  }>(c, `{ shop { name currencyCode ianaTimezone } }`);
   return data.shop;
 }
 
