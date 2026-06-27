@@ -3,10 +3,7 @@
 // Pure-ish: fetches data for a [start, end) range, computes everything in memory.
 // ---------------------------------------------------------------------------
 import { prisma } from "@/lib/prisma";
-import { isoDay, DEFAULT_TZ } from "@/lib/dates";
-
-const DAYS_PER_MONTH = 365.25 / 12; // 30.4375
-const DAYS_PER_YEAR = 365.25;
+import { isoDay, DEFAULT_TZ, proratePeriodic } from "@/lib/dates";
 
 export interface PnlInput {
   organizationId: string; // tenant scope (required)
@@ -116,24 +113,6 @@ export interface DashboardData {
 }
 
 // --- helpers --------------------------------------------------------------
-
-function overlapDays(
-  rangeStart: Date,
-  rangeEnd: Date,
-  costStart: Date,
-  costEnd: Date | null
-): number {
-  const s = Math.max(rangeStart.getTime(), costStart.getTime());
-  const e = Math.min(rangeEnd.getTime(), (costEnd ?? rangeEnd).getTime());
-  if (e <= s) return 0;
-  return (e - s) / 86400000;
-}
-
-function dailyRate(amount: number, cycle: string): number {
-  if (cycle === "YEARLY") return amount / DAYS_PER_YEAR;
-  if (cycle === "MONTHLY") return amount / DAYS_PER_MONTH;
-  return 0; // ONE_TIME handled separately
-}
 
 type OrderWithItems = {
   id: string;
@@ -264,6 +243,7 @@ export async function computeDashboard(
     start,
     end,
     storeId: storeId ?? null,
+    timezone: tz,
     orders,
     rules,
     adSpends,
@@ -396,8 +376,10 @@ function buildPnl(args: {
   allOrdersForShare:
     | { storeId: string; grossRevenue: number; discounts: number; shippingCharged: number }[]
     | null;
+  timezone?: string;
 }): PnlResult {
   const { start, end, storeId, orders, rules, adSpends, fixedCosts } = args;
+  const tz = args.timezone ?? DEFAULT_TZ;
 
   // Revenue
   const grossSales = sum(orders, (o) => o.grossRevenue);
@@ -451,8 +433,20 @@ function buildPnl(args: {
       amount =
         fc.startDate >= start && fc.startDate < end ? fc.amount : 0;
     } else {
-      const days = overlapDays(start, end, fc.startDate, fc.endDate);
-      amount = dailyRate(fc.amount, fc.billingCycle) * days;
+      // Prorate over the overlap of the range and the cost's active window,
+      // dividing by each day's REAL month/year length (e.g. /28, /30, /31).
+      const s = Math.max(start.getTime(), fc.startDate.getTime());
+      const e = Math.min(end.getTime(), (fc.endDate ?? end).getTime());
+      amount =
+        e > s
+          ? proratePeriodic(
+              fc.amount,
+              fc.billingCycle === "YEARLY" ? "YEARLY" : "MONTHLY",
+              new Date(s),
+              new Date(e),
+              tz
+            )
+          : 0;
     }
     // allocate shared (company-wide) fixed costs by revenue share for store view
     if (storeId && fc.storeId === null) amount *= revenueShare;

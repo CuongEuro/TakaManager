@@ -133,3 +133,46 @@ export function isoDay(d: Date, timeZone: string = DEFAULT_TZ): string {
   const { y, m, d: day } = partsInTz(d, timeZone);
   return `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
+
+/** Number of days in a calendar month (month is 1-based). */
+export function daysInMonth(year: number, month1: number): number {
+  return new Date(Date.UTC(year, month1, 0)).getUTCDate();
+}
+
+/** Number of days in a year (365 or 366). */
+export function daysInYear(year: number): number {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 366 : 365;
+}
+
+/**
+ * Prorate a recurring amount over [start, end) using each calendar day's REAL
+ * month/year length (so a monthly fee is amount/28 in February, amount/31 in
+ * July, etc.). Works across month boundaries. start/end are UTC instants;
+ * day boundaries are taken in `timeZone`.
+ */
+export function proratePeriodic(
+  amount: number,
+  cycle: "MONTHLY" | "YEARLY",
+  start: Date,
+  end: Date,
+  timeZone: string = DEFAULT_TZ
+): number {
+  const endMs = end.getTime();
+  let cursor = start.getTime();
+  if (endMs <= cursor) return 0;
+
+  let total = 0;
+  let guard = 0;
+  while (cursor < endMs && guard++ < 100000) {
+    const { y, m, d } = partsInTz(new Date(cursor), timeZone);
+    const dayStart = zonedMidnight(y, m, d, timeZone).getTime();
+    const nextStart = zonedMidnight(y, m, d + 1, timeZone).getTime(); // d+1 overflows safely
+    const segEnd = Math.min(endMs, nextStart);
+    const dayLen = nextStart - dayStart || 86400000;
+    const fraction = (segEnd - cursor) / dayLen; // 1 for whole days, <1 at edges
+    const denom = cycle === "YEARLY" ? daysInYear(y) : daysInMonth(y, m);
+    total += (amount / denom) * fraction;
+    cursor = segEnd;
+  }
+  return total;
+}
