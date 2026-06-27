@@ -66,7 +66,7 @@ export async function testGoogle(creds: AdAccountCreds): Promise<string> {
 
 interface GoogleResult {
   segments?: { date?: string };
-  campaign?: { name?: string };
+  campaign?: { id?: string; name?: string };
   metrics?: {
     costMicros?: string;
     impressions?: string;
@@ -83,7 +83,7 @@ export async function fetchGoogleInsights(
   const token = await getAccessToken(creds);
   const cid = customerId(creds);
   const query = `
-    SELECT segments.date, campaign.name, metrics.cost_micros,
+    SELECT segments.date, campaign.id, campaign.name, metrics.cost_micros,
            metrics.impressions, metrics.clicks, metrics.conversions,
            metrics.conversions_value
     FROM campaign
@@ -103,6 +103,7 @@ export async function fetchGoogleInsights(
     for (const r of chunk.results ?? []) {
       out.push({
         date: r.segments?.date ?? "",
+        campaignExternalId: r.campaign?.id ?? null,
         campaignName: r.campaign?.name ?? null,
         spend: num(r.metrics?.costMicros) / 1_000_000,
         impressions: num(r.metrics?.impressions),

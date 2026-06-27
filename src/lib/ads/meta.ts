@@ -9,6 +9,7 @@ const PURCHASE_KEYS = ["purchase", "omni_purchase"];
 
 interface MetaRow {
   date_start: string;
+  campaign_id?: string;
   campaign_name?: string;
   spend?: string;
   impressions?: string;
@@ -51,7 +52,7 @@ export async function fetchMetaInsights(
   const params = new URLSearchParams({
     level: "campaign",
     time_increment: "1",
-    fields: "campaign_name,spend,impressions,clicks,actions,action_values",
+    fields: "campaign_id,campaign_name,spend,impressions,clicks,actions,action_values",
     time_range: timeRange,
     limit: "500",
     access_token: creds.accessToken,
@@ -69,6 +70,7 @@ export async function fetchMetaInsights(
     for (const r of (json.data ?? []) as MetaRow[]) {
       out.push({
         date: r.date_start,
+        campaignExternalId: r.campaign_id ?? null,
         campaignName: r.campaign_name ?? null,
         spend: num(r.spend),
         impressions: num(r.impressions),

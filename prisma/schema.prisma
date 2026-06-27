@@ -238,6 +238,8 @@ model AdSpend {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   storeId        String?
   store        Store?   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  accountId    String?  // source AdAccount for API rows (null for MANUAL) — lets a
+                        // re-sync delete+rebuild this account's rows when mappings change
   platform     String   // FACEBOOK | GOOGLE | TWITTER | OTHER
   date         DateTime // the day this spend belongs to
   campaignName String?
@@ -256,6 +258,7 @@ model AdSpend {
 
   @@index([organizationId])
   @@index([storeId])
+  @@index([accountId])
   @@index([platform])
   @@index([date])
 }

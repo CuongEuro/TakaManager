@@ -226,12 +226,40 @@ export async function syncAdAccount(
     const creds = toCreds(a);
     const insights = await fetchInsights(creds, since);
 
+    // Deep hierarchy FIRST so campaign entities exist (they are the mapping
+    // target). syncHierarchy's update only touches name → a user's campaign→store
+    // mapping (AdEntity.storeId) is preserved across re-syncs.
+    const adsetRows = await fetchAdsets(creds, since);
+    const adsets = await syncHierarchy(
+      {
+        id: a.id,
+        organizationId: a.organizationId,
+        storeId: a.storeId,
+        platform: a.platform,
+      },
+      adsetRows
+    );
+
+    // Campaign → store mapping (campaign-level attribution). A spend row's store
+    // is the campaign's mapped store, else the account's store (Google/Twitter =
+    // one account per store; Meta = shared account split per campaign).
+    const campaignEntities = await prisma.adEntity.findMany({
+      where: { accountId: a.id, level: "CAMPAIGN" },
+      select: { externalId: true, storeId: true },
+    });
+    const campaignStore = new Map(
+      campaignEntities.map((c) => [c.externalId, c.storeId])
+    );
+    const resolveStore = (cid: string | null): string | null =>
+      (cid ? campaignStore.get(cid) : null) ?? a.storeId;
+
     // Aggregate by dedupeKey first (collapses same-day/same-campaign rows within
-    // this run), then upsert by the unique key — idempotent across re-syncs.
+    // this run), with the RESOLVED store.
     const agg = new Map<
       string,
       {
         date: Date;
+        storeId: string | null;
         campaignName: string | null;
         spend: number;
         impressions: number;
@@ -241,9 +269,11 @@ export async function syncAdAccount(
       }
     >();
     for (const ins of insights) {
+      const storeId = resolveStore(ins.campaignExternalId);
       const key = adSpendDedupeKey({
         source: "API",
-        storeId: a.storeId,
+        accountId: a.id,
+        storeId,
         platform: a.platform,
         date: ins.date,
         campaignName: ins.campaignName,
@@ -258,6 +288,7 @@ export async function syncAdAccount(
       } else {
         agg.set(key, {
           date: new Date(`${ins.date}T00:00:00`),
+          storeId,
           campaignName: ins.campaignName,
           spend: ins.spend,
           impressions: ins.impressions,
@@ -268,12 +299,18 @@ export async function syncAdAccount(
       }
     }
 
+    // Rebuild this account's API rows for the window: delete then insert, so a
+    // changed campaign→store mapping never leaves stale rows under the old store.
+    await prisma.adSpend.deleteMany({
+      where: { accountId: a.id, source: "API", date: { gte: since } },
+    });
     for (const [dedupeKey, row] of agg) {
       await prisma.adSpend.upsert({
         where: { dedupeKey },
         create: {
           organizationId: a.organizationId,
-          storeId: a.storeId,
+          storeId: row.storeId,
+          accountId: a.id,
           platform: a.platform,
           date: row.date,
           campaignName: row.campaignName,
@@ -286,6 +323,8 @@ export async function syncAdAccount(
           dedupeKey,
         },
         update: {
+          storeId: row.storeId,
+          accountId: a.id,
           date: row.date,
           spend: row.spend,
           impressions: row.impressions,
@@ -295,18 +334,6 @@ export async function syncAdAccount(
         },
       });
     }
-
-    // deep hierarchy: campaign + adset entities & daily metrics
-    const adsetRows = await fetchAdsets(creds, since);
-    const adsets = await syncHierarchy(
-      {
-        id: a.id,
-        organizationId: a.organizationId,
-        storeId: a.storeId,
-        platform: a.platform,
-      },
-      adsetRows
-    );
 
     await prisma.adAccount.update({
       where: { id: accountId },

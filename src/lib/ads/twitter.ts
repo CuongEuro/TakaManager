@@ -152,6 +152,7 @@ export async function fetchTwitterInsights(
         if (spend === 0 && impressions === 0 && clicks === 0) continue;
         out.push({
           date: ymd(day),
+          campaignExternalId: row.id ?? null,
           campaignName: byId.get(row.id) ?? null,
           spend,
           impressions,

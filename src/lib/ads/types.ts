@@ -1,6 +1,7 @@
 // Normalized ad-insight row (one campaign × one day) used across all platforms.
 export interface AdInsight {
   date: string; // YYYY-MM-DD
+  campaignExternalId: string | null; // for campaign→store attribution
   campaignName: string | null;
   spend: number;
   impressions: number;
@@ -48,6 +49,7 @@ export interface AdAccountCreds {
  */
 export function adSpendDedupeKey(parts: {
   source: string;
+  accountId?: string | null; // distinguishes campaigns of same name across accounts
   storeId: string | null;
   platform: string;
   date: string; // YYYY-MM-DD
@@ -55,6 +57,7 @@ export function adSpendDedupeKey(parts: {
 }): string {
   return [
     parts.source,
+    parts.accountId ?? "_",
     parts.storeId ?? "_",
     parts.platform,
     parts.date,

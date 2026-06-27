@@ -24,12 +24,26 @@ function isConfigured(a: {
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const accounts = await prisma.adAccount.findMany({
-    where: { organizationId: session.oid },
-    orderBy: { createdAt: "desc" },
-    include: { store: { select: { name: true } } },
-  });
-  // strip secrets — only expose a "configured" flag
+  const [accounts, campTotal, campMapped] = await Promise.all([
+    prisma.adAccount.findMany({
+      where: { organizationId: session.oid },
+      orderBy: { createdAt: "desc" },
+      include: { store: { select: { name: true } } },
+    }),
+    prisma.adEntity.groupBy({
+      by: ["accountId"],
+      where: { organizationId: session.oid, level: "CAMPAIGN" },
+      _count: { _all: true },
+    }),
+    prisma.adEntity.groupBy({
+      by: ["accountId"],
+      where: { organizationId: session.oid, level: "CAMPAIGN", storeId: { not: null } },
+      _count: { _all: true },
+    }),
+  ]);
+  const totalBy = new Map(campTotal.map((c) => [c.accountId, c._count._all]));
+  const mappedBy = new Map(campMapped.map((c) => [c.accountId, c._count._all]));
+  // strip secrets — only expose a "configured" flag + campaign mapping counts
   const safe = accounts.map((a) => ({
     id: a.id,
     storeId: a.storeId,
@@ -40,6 +54,8 @@ export async function GET() {
     active: a.active,
     lastSyncedAt: a.lastSyncedAt,
     configured: isConfigured(a),
+    campaignCount: totalBy.get(a.id) ?? 0,
+    mappedCount: mappedBy.get(a.id) ?? 0,
   }));
   return NextResponse.json(safe);
 }

@@ -27,10 +27,19 @@ interface AdAccount {
   active: boolean;
   lastSyncedAt: string | null;
   configured: boolean;
+  campaignCount: number;
+  mappedCount: number;
 }
 interface Store {
   id: string;
   name: string;
+}
+interface Campaign {
+  id: string;
+  externalId: string;
+  name: string;
+  storeId: string | null;
+  status: string | null;
 }
 
 const CRED_FIELDS: Record<string, { key: string; label: string }[]> = {
@@ -70,6 +79,54 @@ export default function AdAccountsPage() {
   const [creds, setCreds] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+
+  // Campaign → store mapping panel state
+  const [mapAccount, setMapAccount] = useState<AdAccount | null>(null);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [mapDraft, setMapDraft] = useState<Record<string, string>>({}); // campaignId → storeId
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapSaving, setMapSaving] = useState(false);
+
+  async function openMapping(a: AdAccount) {
+    setMapAccount(a);
+    setCampaigns([]);
+    setMapDraft({});
+    setMapLoading(true);
+    try {
+      const r = await fetch(`/api/ads/accounts/${a.id}/campaigns`).then((x) => x.json());
+      const list: Campaign[] = r.campaigns ?? [];
+      setCampaigns(list);
+      setMapDraft(Object.fromEntries(list.map((c) => [c.id, c.storeId ?? ""])));
+    } finally {
+      setMapLoading(false);
+    }
+  }
+
+  async function saveMapping() {
+    if (!mapAccount) return;
+    setMapSaving(true);
+    setMsg(null);
+    try {
+      const mappings = campaigns.map((c) => ({ id: c.id, storeId: mapDraft[c.id] || null }));
+      const r = await fetch(`/api/ads/accounts/${mapAccount.id}/campaigns`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mappings }),
+      }).then((x) => x.json());
+      setMsg({
+        ok: !!r.ok,
+        text: r.ok
+          ? r.resync?.ok
+            ? "✓ Đã gán campaign → store và đồng bộ lại chi phí."
+            : `✓ Đã lưu mapping. ⚠️ Đồng bộ lại lỗi: ${r.resync?.error ?? "?"} (bấm Sync lại sau).`
+          : `✗ ${r.error ?? "Lưu mapping thất bại"}`,
+      });
+      setMapAccount(null);
+      await load();
+    } finally {
+      setMapSaving(false);
+    }
+  }
 
   async function add() {
     if (!name.trim() || !externalId.trim()) return;
@@ -135,7 +192,7 @@ export default function AdAccountsPage() {
     <div>
       <PageHeader
         title="Kết nối Ads"
-        subtitle="Tự động kéo chi phí quảng cáo từ Meta / Google / X về để tính ROAS theo kênh."
+        subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Google/Twitter: 1 tài khoản/store. Meta: 1 tài khoản chung → bấm 'Gán store' để chia chi phí từng campaign về đúng store."
         actions={
           <Button onClick={syncAll} disabled={busy === "ALL"}>
             {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
@@ -151,6 +208,68 @@ export default function AdAccountsPage() {
         >
           {msg.text}
         </div>
+      )}
+
+      {mapAccount && (
+        <Card className="mb-6 border-brand-200">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold text-slate-700">
+              Gán campaign → store · {mapAccount.name}
+            </div>
+            <button
+              onClick={() => setMapAccount(null)}
+              className="text-sm text-slate-400 hover:text-slate-600"
+            >
+              ✗ Đóng
+            </button>
+          </div>
+          {mapLoading ? (
+            <EmptyState message="Đang tải campaign..." />
+          ) : campaigns.length === 0 ? (
+            <EmptyState message="Chưa có campaign — bấm Sync tài khoản này trước rồi quay lại gán." />
+          ) : (
+            <>
+              <p className="mb-3 text-xs text-slate-400">
+                Mỗi campaign gán cho 1 store → chi phí campaign đó tính vào store tương
+                ứng. Để trống = chưa gán (chỉ vào tổng &quot;Tất cả store&quot;). Lưu xong hệ
+                thống tự đồng bộ lại chi phí.
+              </p>
+              <div className="max-h-80 space-y-2 overflow-y-auto">
+                {campaigns.map((c) => (
+                  <div
+                    key={c.id}
+                    className="grid grid-cols-[1fr_220px] items-center gap-3"
+                  >
+                    <div className="truncate text-sm text-slate-700" title={c.name}>
+                      {c.name}
+                    </div>
+                    <Select
+                      value={mapDraft[c.id] ?? ""}
+                      onChange={(e) =>
+                        setMapDraft({ ...mapDraft, [c.id]: e.target.value })
+                      }
+                    >
+                      <option value="">— Chưa gán —</option>
+                      {stores.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 flex justify-end gap-2">
+                <Button variant="secondary" onClick={() => setMapAccount(null)}>
+                  Huỷ
+                </Button>
+                <Button onClick={saveMapping} disabled={mapSaving}>
+                  {mapSaving ? "Đang lưu & đồng bộ..." : "✓ Lưu & đồng bộ lại"}
+                </Button>
+              </div>
+            </>
+          )}
+        </Card>
       )}
 
       <Card className="mb-6">
@@ -235,7 +354,16 @@ export default function AdAccountsPage() {
                   </Td>
                   <Td className="font-medium text-slate-800">{a.name}</Td>
                   <Td className="text-slate-500">{a.externalId}</Td>
-                  <Td className="text-slate-500">{a.storeName ?? "Chung"}</Td>
+                  <Td className="text-slate-500">
+                    <div className="flex flex-col gap-0.5">
+                      <span>{a.storeName ?? "Chung"}</span>
+                      {a.campaignCount > 0 && (
+                        <Badge tone={a.mappedCount > 0 ? "green" : "amber"}>
+                          {a.mappedCount}/{a.campaignCount} campaign đã gán
+                        </Badge>
+                      )}
+                    </div>
+                  </Td>
                   <Td>
                     {a.configured ? (
                       <Badge tone="green">Đủ khoá</Badge>
@@ -250,6 +378,13 @@ export default function AdAccountsPage() {
                   </Td>
                   <Td className="text-right">
                     <div className="flex justify-end gap-1">
+                      <Button
+                        variant="secondary"
+                        onClick={() => openMapping(a)}
+                        title="Gán campaign → store"
+                      >
+                        Gán store
+                      </Button>
                       <Button
                         variant="secondary"
                         onClick={() => action("test", a.id)}

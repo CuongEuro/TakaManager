@@ -78,7 +78,7 @@ export default function AdsPage() {
     <div>
       <PageHeader
         title="Chi phí biến đổi B — Quảng cáo"
-        subtitle="Spend Facebook / Google / Twitter. Nhập tay bây giờ; sẽ tự đồng bộ qua API ở Phase 3."
+        subtitle="2 cách nhập chi phí Ads: (1) tự động — kết nối tài khoản ở trang 'Kết nối Ads'; (2) thủ công — nhập tay bên dưới. Dòng nhập tay không bị ghi đè khi đồng bộ API."
       />
 
       <Card className="mb-6">
