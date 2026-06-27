@@ -216,11 +216,13 @@ export async function syncAdAccount(
   if (!a || a.organizationId !== organizationId)
     throw new Error("Không tìm thấy tài khoản");
 
-  const since = opts.sinceDays
-    ? daysAgo(opts.sinceDays)
-    : a.lastSyncedAt
-    ? new Date(a.lastSyncedAt.getTime() - 2 * 86400000)
-    : daysAgo(30);
+  // sinceDays may be 0 ("Hôm nay") → use != null, not a truthy check.
+  const since =
+    opts.sinceDays != null
+      ? daysAgo(opts.sinceDays)
+      : a.lastSyncedAt
+      ? new Date(a.lastSyncedAt.getTime() - 2 * 86400000)
+      : daysAgo(7);
 
   try {
     const creds = toCreds(a);

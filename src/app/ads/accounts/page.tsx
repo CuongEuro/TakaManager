@@ -79,6 +79,8 @@ export default function AdAccountsPage() {
   const [creds, setCreds] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // Sync window (days back) — keep it light, don't pull heavy old history.
+  const [rangeDays, setRangeDays] = useState("7");
 
   // Campaign → store mapping panel state
   const [mapAccount, setMapAccount] = useState<AdAccount | null>(null);
@@ -201,7 +203,11 @@ export default function AdAccountsPage() {
       const r = await fetch(`/api/ads/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId }),
+        body: JSON.stringify(
+          endpoint === "sync"
+            ? { accountId, sinceDays: Number(rangeDays) }
+            : { accountId }
+        ),
       }).then((x) => x.json());
       if (endpoint === "test") {
         setMsg({ ok: r.ok, text: r.ok ? `✓ Kết nối OK: ${r.info}` : `✗ ${r.error}` });
@@ -227,7 +233,7 @@ export default function AdAccountsPage() {
       const r = await fetch("/api/ads/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ sinceDays: Number(rangeDays) }),
       }).then((x) => x.json());
       const ok = (r.results ?? []).filter((x: { ok: boolean }) => x.ok).length;
       setMsg({ ok: ok > 0, text: `Đồng bộ ${ok}/${r.results?.length ?? 0} tài khoản.` });
@@ -243,9 +249,25 @@ export default function AdAccountsPage() {
         title="Kết nối Ads"
         subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Tài khoản chạy cho 1 store → chọn Store khi thêm. Tài khoản dùng chung nhiều store (hay gặp ở Meta) → để 'Chung' rồi bấm 'Gán store' cho từng campaign."
         actions={
-          <Button onClick={syncAll} disabled={busy === "ALL"}>
-            {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
-          </Button>
+          <div className="flex items-end gap-2">
+            <div className="w-36">
+              <Field label="Kéo dữ liệu">
+                <Select
+                  value={rangeDays}
+                  onChange={(e) => setRangeDays(e.target.value)}
+                  disabled={!!busy}
+                >
+                  <option value="0">Hôm nay</option>
+                  <option value="1">Hôm qua → nay</option>
+                  <option value="7">7 ngày</option>
+                  <option value="30">30 ngày</option>
+                </Select>
+              </Field>
+            </div>
+            <Button onClick={syncAll} disabled={busy === "ALL"}>
+              {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
+            </Button>
+          </div>
         }
       />
 

@@ -9,7 +9,9 @@ export async function POST(req: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const b = await req.json().catch(() => ({}));
-  const sinceDays = b.sinceDays ? Number(b.sinceDays) : undefined;
+  // sinceDays may be 0 ("Hôm nay") → only treat null/undefined as "not provided".
+  const sinceDays =
+    b.sinceDays !== undefined && b.sinceDays !== null ? Number(b.sinceDays) : undefined;
   try {
     if (b.accountId) {
       const result = await syncAdAccount(String(b.accountId), session.oid, {

@@ -64,9 +64,10 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
   }
 
   // Re-attribute spend with the new mapping (best-effort; mapping is already saved).
+  // Keep the window light (30d) to avoid pulling heavy old campaign history.
   let resync: { ok: boolean; error?: string } = { ok: true };
   try {
-    const r = await syncAdAccount(id, session.oid, { sinceDays: 90 });
+    const r = await syncAdAccount(id, session.oid, { sinceDays: 30 });
     resync = { ok: r.ok, error: r.error };
   } catch (e) {
     resync = { ok: false, error: e instanceof Error ? e.message : String(e) };
