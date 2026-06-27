@@ -87,7 +87,56 @@ export default function AdAccountsPage() {
   const [mapLoading, setMapLoading] = useState(false);
   const [mapSaving, setMapSaving] = useState(false);
 
+  // Edit-account panel state
+  const [editAccount, setEditAccount] = useState<AdAccount | null>(null);
+  const [editForm, setEditForm] = useState({ storeId: "", name: "", externalId: "" });
+  const [editCreds, setEditCreds] = useState<Record<string, string>>({});
+  const [editSaving, setEditSaving] = useState(false);
+
+  function openEdit(a: AdAccount) {
+    setMapAccount(null);
+    setEditAccount(a);
+    setEditForm({
+      storeId: a.storeId ?? "",
+      name: a.name,
+      externalId: a.externalId,
+    });
+    setEditCreds({});
+  }
+
+  async function saveEdit() {
+    if (!editAccount || !editForm.name.trim() || !editForm.externalId.trim()) return;
+    setEditSaving(true);
+    setMsg(null);
+    try {
+      // Only send creds the user actually typed (blank = keep existing).
+      const creds = Object.fromEntries(
+        Object.entries(editCreds).filter(([, v]) => v.trim() !== "")
+      );
+      const r = await fetch(`/api/ads/accounts/${editAccount.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storeId: editForm.storeId || null,
+          name: editForm.name.trim(),
+          externalId: editForm.externalId.trim(),
+          ...creds,
+        }),
+      });
+      setMsg(
+        r.ok
+          ? { ok: true, text: `✓ Đã cập nhật tài khoản "${editForm.name.trim()}".` }
+          : { ok: false, text: `✗ Cập nhật thất bại (HTTP ${r.status}).` }
+      );
+      setEditAccount(null);
+      await load();
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   async function openMapping(a: AdAccount) {
+    setEditAccount(null);
     setMapAccount(a);
     setCampaigns([]);
     setMapDraft({});
@@ -208,6 +257,76 @@ export default function AdAccountsPage() {
         >
           {msg.text}
         </div>
+      )}
+
+      {editAccount && (
+        <Card className="mb-6 border-brand-200">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold text-slate-700">
+              Sửa tài khoản · {AD_PLATFORM_LABELS[editAccount.platform] ?? editAccount.platform}
+            </div>
+            <button
+              onClick={() => setEditAccount(null)}
+              className="text-sm text-slate-400 hover:text-slate-600"
+            >
+              ✗ Đóng
+            </button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <Field label="Store">
+              <Select
+                value={editForm.storeId}
+                onChange={(e) => setEditForm({ ...editForm, storeId: e.target.value })}
+              >
+                <option value="">— Chung —</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Tên gợi nhớ">
+              <Input
+                value={editForm.name}
+                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+              />
+            </Field>
+            <Field label={EXTID_LABEL[editAccount.platform]}>
+              <Input
+                value={editForm.externalId}
+                onChange={(e) => setEditForm({ ...editForm, externalId: e.target.value })}
+              />
+            </Field>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            {(CRED_FIELDS[editAccount.platform] ?? []).map((f) => (
+              <Field key={f.key} label={f.label}>
+                <Input
+                  type="password"
+                  value={editCreds[f.key] ?? ""}
+                  onChange={(e) => setEditCreds({ ...editCreds, [f.key]: e.target.value })}
+                  placeholder="để trống = giữ nguyên"
+                  autoComplete="off"
+                />
+              </Field>
+            ))}
+          </div>
+          <div className="mt-4 flex items-center justify-between">
+            <p className="text-xs text-slate-400">
+              Khoá để trống sẽ giữ nguyên giá trị cũ. Đổi Store ở đây = store mặc định
+              cho các campaign chưa gán riêng.
+            </p>
+            <div className="flex gap-2">
+              <Button variant="secondary" onClick={() => setEditAccount(null)}>
+                Huỷ
+              </Button>
+              <Button onClick={saveEdit} disabled={editSaving}>
+                {editSaving ? "Đang lưu..." : "✓ Lưu thay đổi"}
+              </Button>
+            </div>
+          </div>
+        </Card>
       )}
 
       {mapAccount && (
@@ -388,6 +507,13 @@ export default function AdAccountsPage() {
                   </Td>
                   <Td className="text-right">
                     <div className="flex justify-end gap-1">
+                      <Button
+                        variant="secondary"
+                        onClick={() => openEdit(a)}
+                        title="Sửa Store / tên / khoá"
+                      >
+                        ✏️
+                      </Button>
                       <Button
                         variant="secondary"
                         onClick={() => openMapping(a)}
