@@ -192,7 +192,7 @@ export default function AdAccountsPage() {
     <div>
       <PageHeader
         title="Kết nối Ads"
-        subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Google/Twitter: 1 tài khoản/store. Meta: 1 tài khoản chung → bấm 'Gán store' để chia chi phí từng campaign về đúng store."
+        subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Tài khoản chạy cho 1 store → chọn Store khi thêm. Tài khoản dùng chung nhiều store (hay gặp ở Meta) → để 'Chung' rồi bấm 'Gán store' cho từng campaign."
         actions={
           <Button onClick={syncAll} disabled={busy === "ALL"}>
             {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
@@ -230,9 +230,11 @@ export default function AdAccountsPage() {
           ) : (
             <>
               <p className="mb-3 text-xs text-slate-400">
-                Mỗi campaign gán cho 1 store → chi phí campaign đó tính vào store tương
-                ứng. Để trống = chưa gán (chỉ vào tổng &quot;Tất cả store&quot;). Lưu xong hệ
-                thống tự đồng bộ lại chi phí.
+                Mỗi campaign gán cho 1 store → chi phí campaign đó tính vào store đó.
+                {mapAccount.storeId
+                  ? ` Để trống = theo store mặc định của tài khoản (${mapAccount.storeName}).`
+                  : " Để trống = chưa gán (chỉ vào tổng “Tất cả store”)."}{" "}
+                Lưu xong hệ thống tự đồng bộ lại chi phí.
               </p>
               <div className="max-h-80 space-y-2 overflow-y-auto">
                 {campaigns.map((c) => (
@@ -249,7 +251,11 @@ export default function AdAccountsPage() {
                         setMapDraft({ ...mapDraft, [c.id]: e.target.value })
                       }
                     >
-                      <option value="">— Chưa gán —</option>
+                      <option value="">
+                        {mapAccount.storeId
+                          ? `— Mặc định: ${mapAccount.storeName} —`
+                          : "— Chưa gán (tổng chung) —"}
+                      </option>
                       {stores.map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name}
@@ -355,12 +361,16 @@ export default function AdAccountsPage() {
                   <Td className="font-medium text-slate-800">{a.name}</Td>
                   <Td className="text-slate-500">{a.externalId}</Td>
                   <Td className="text-slate-500">
-                    <div className="flex flex-col gap-0.5">
+                    <div className="flex flex-col items-start gap-0.5">
                       <span>{a.storeName ?? "Chung"}</span>
-                      {a.campaignCount > 0 && (
-                        <Badge tone={a.mappedCount > 0 ? "green" : "amber"}>
-                          {a.mappedCount}/{a.campaignCount} campaign đã gán
+                      {a.mappedCount > 0 && (
+                        <Badge tone="green">
+                          {a.mappedCount}/{a.campaignCount} campaign gán riêng
                         </Badge>
+                      )}
+                      {/* Only warn when the account has no default store AND nothing mapped */}
+                      {!a.storeId && a.mappedCount === 0 && a.campaignCount > 0 && (
+                        <Badge tone="amber">Chưa gán campaign nào</Badge>
                       )}
                     </div>
                   </Td>
