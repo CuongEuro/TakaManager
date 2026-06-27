@@ -129,7 +129,7 @@ type OrderWithItems = {
     image: string | null;
     quantity: number;
     price: number;
-    product: { baseCost: number; catalog: string | null } | null;
+    product: { baseCost: number; catalog: string | null; image: string | null } | null;
   }[];
 };
 
@@ -587,12 +587,15 @@ function buildBestSellers(orders: OrderWithItems[]): BestSeller[] {
   for (const o of orders) {
     for (const li of o.lineItems) {
       const key = li.productId ?? `title:${li.title}`;
+      // line-item image (may be null on webhook orders) → fall back to the
+      // product's stored featured image.
+      const img = li.image ?? li.product?.image ?? null;
       const cur =
         map.get(key) ??
         ({
           productId: li.productId,
           title: li.title,
-          image: li.image,
+          image: img,
           orders: 0,
           units: 0,
           revenue: 0,
@@ -600,7 +603,7 @@ function buildBestSellers(orders: OrderWithItems[]): BestSeller[] {
       cur.units += li.quantity;
       cur.revenue += li.price * li.quantity;
       cur.orders += 1;
-      if (!cur.image && li.image) cur.image = li.image;
+      if (!cur.image && img) cur.image = img;
       map.set(key, cur);
     }
   }

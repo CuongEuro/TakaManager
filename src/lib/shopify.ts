@@ -368,6 +368,34 @@ export interface OrdersPage {
   usedJourney: boolean;
 }
 
+const PRODUCT_IMAGES_QUERY = `
+query ProductImages($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product { id featuredImage { url } }
+  }
+}`;
+
+/** Fetch featuredImage URLs for a set of product GIDs (batched by 100).
+ *  Used to backfill images for products derived from orders (incl. webhooks). */
+export async function fetchProductImages(
+  creds: ShopifyCreds,
+  productGids: string[]
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (productGids.length === 0) return out;
+  const c = await resolveCreds(creds);
+  for (let i = 0; i < productGids.length; i += 100) {
+    const ids = productGids.slice(i, i + 100);
+    const data = await shopifyGraphQL<{
+      nodes: ({ id: string; featuredImage: { url: string } | null } | null)[];
+    }>(c, PRODUCT_IMAGES_QUERY, { ids });
+    for (const n of data.nodes) {
+      if (n?.featuredImage?.url) out.set(n.id, n.featuredImage.url);
+    }
+  }
+  return out;
+}
+
 /** Total number of orders in the window — best-effort, for an accurate progress
  *  bar. Returns null if the API/version doesn't support ordersCount. */
 export async function fetchOrdersCount(

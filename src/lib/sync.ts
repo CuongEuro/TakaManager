@@ -14,6 +14,7 @@ import {
   fetchOrdersPage,
   fetchOrdersCount,
   fetchOrdersSince,
+  fetchProductImages,
   ShopifyCreds,
   ShopifyOrderNorm,
 } from "@/lib/shopify";
@@ -73,9 +74,16 @@ async function upsertProductsFromOrders(
 ): Promise<Map<string, string>> {
   const derived = new Map<string, { title: string; image: string | null }>();
   for (const o of orders)
-    for (const li of o.lineItems)
-      if (li.externalProductId && !derived.has(li.externalProductId))
+    for (const li of o.lineItems) {
+      if (!li.externalProductId) continue;
+      const prev = derived.get(li.externalProductId);
+      if (!prev) {
         derived.set(li.externalProductId, { title: li.title, image: li.image });
+      } else if (!prev.image && li.image) {
+        // keep the first non-null image we see for this product in the batch
+        prev.image = li.image;
+      }
+    }
 
   const map = new Map<string, string>();
   for (const [externalId, p] of derived) {
@@ -89,8 +97,9 @@ async function upsertProductsFromOrders(
         image: p.image,
         // baseCost not pulled from Shopify → COGS comes from Cost Rules.
       },
-      // Refresh title/image only; never clobber a manually-set baseCost.
-      update: { title: p.title, image: p.image },
+      // Refresh title; only set image when we actually have one so a webhook
+      // order (which carries no product image) never wipes a synced image.
+      update: { title: p.title, ...(p.image ? { image: p.image } : {}) },
     });
     map.set(externalId, saved.id);
   }
@@ -141,6 +150,39 @@ async function upsertOrders(
       },
       update: { ...common, lineItems: { deleteMany: {}, create: lineItemData } },
     });
+  }
+}
+
+/** Backfill featured images for this store's products that are still missing one
+ *  (e.g. products that only arrived via image-less webhook orders). Best-effort:
+ *  capped per run and never fails the sync. Returns how many were filled. */
+async function backfillStoreImages(
+  storeId: string,
+  organizationId: string,
+  creds: ShopifyCreds
+): Promise<number> {
+  try {
+    const missing = await prisma.product.findMany({
+      where: { organizationId, storeId, image: null, externalId: { not: null } },
+      select: { id: true, externalId: true },
+      take: 250,
+    });
+    if (missing.length === 0) return 0;
+    const imgs = await fetchProductImages(
+      creds,
+      missing.map((m) => m.externalId!).filter(Boolean)
+    );
+    let updated = 0;
+    for (const m of missing) {
+      const url = m.externalId ? imgs.get(m.externalId) : undefined;
+      if (url) {
+        await prisma.product.update({ where: { id: m.id }, data: { image: url } });
+        updated++;
+      }
+    }
+    return updated;
+  } catch {
+    return 0; // image backfill is non-critical
   }
 }
 
@@ -218,12 +260,14 @@ export async function syncStorePage(
     const productMap = await upsertProductsFromOrders(page.orders, storeId, organizationId);
     await upsertOrders(page.orders, storeId, organizationId, productMap);
 
-    // Mark the store synced when we've consumed the last page.
-    if (!page.hasNext)
+    // On the last page, mark synced and backfill any missing product images.
+    if (!page.hasNext) {
       await prisma.store.update({
         where: { id: storeId },
         data: { lastSyncedAt: new Date() },
       });
+      await backfillStoreImages(storeId, organizationId, creds);
+    }
 
     return {
       ...base,
@@ -276,6 +320,7 @@ export async function syncStore(
       where: { id: storeId },
       data: { lastSyncedAt: new Date() },
     });
+    await backfillStoreImages(storeId, organizationId, creds);
     return {
       storeId,
       storeName,
