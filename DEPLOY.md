@@ -91,21 +91,22 @@ npx prisma db push
 
 ---
 
-## 6. Tự động đồng bộ hằng ngày (Vercel Cron)
+## 6. Tự động đồng bộ Ads hằng ngày (Vercel Cron)
 
-Thêm `vercel.json` ở gốc repo:
+Đã có sẵn `vercel.json` ở gốc repo:
 
 ```json
-{
-  "crons": [
-    { "path": "/api/shopify/sync", "schedule": "0 1 * * *" },
-    { "path": "/api/ads/sync", "schedule": "0 2 * * *" }
-  ]
-}
+{ "crons": [ { "path": "/api/cron/sync", "schedule": "0 1 * * *" } ] }
 ```
 
-> Cron của Vercel gọi route bằng GET nội bộ — nếu cần, bổ sung một secret header để xác thực
-> và cho 2 route này chấp nhận trigger từ cron (hiện chúng yêu cầu session đăng nhập).
+- Chạy **1 lần/ngày lúc 01:00 UTC (10:00 giờ Nhật)** — gói **Hobby chỉ cho 1 lần/ngày**
+  (muốn dày hơn cần Pro). Cron kéo **7 ngày gần nhất** chi phí Ads cho **mọi workspace**
+  (nhẹ; không đụng lịch sử cũ).
+- **Bảo mật:** đặt biến môi trường **`CRON_SECRET`** trên Vercel (Settings → Environment
+  Variables, giá trị ngẫu nhiên — `openssl rand -hex 32`). Vercel tự gắn
+  `Authorization: Bearer <CRON_SECRET>` khi gọi cron; endpoint từ chối nếu thiếu/sai
+  (trả 401/503). Không có biến này thì cron sẽ không chạy.
+- Shopify đã realtime qua **webhook** + Sync tay nên không cần cron; muốn thêm cũng được.
 
 ---
 
@@ -116,4 +117,4 @@ Thêm `vercel.json` ở gốc repo:
 - [ ] `provider = "postgresql"` trong schema → `npx prisma db push`
 - [ ] Import vào Vercel + đặt `DATABASE_URL`, `AUTH_SECRET`
 - [ ] Deploy → mở `/signup` tạo tài khoản
-- [ ] (Tuỳ chọn) cấu hình Vercel Cron
+- [ ] (Tuỳ chọn) đặt `CRON_SECRET` để bật Vercel Cron đồng bộ Ads hằng ngày

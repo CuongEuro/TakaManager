@@ -8,11 +8,13 @@ const PUBLIC_PAGES = ["/login", "/signup"];
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Always allow auth endpoints, the Shopify webhook receiver (verified by HMAC,
-  // not by session), and the login/signup pages.
+  // Always allow auth endpoints, the Shopify webhook receiver (verified by HMAC),
+  // the cron endpoint (verified by CRON_SECRET), and the login/signup pages —
+  // none of these carry a session cookie.
   if (
     pathname.startsWith("/api/auth") ||
     pathname === "/api/shopify/webhook" ||
+    pathname.startsWith("/api/cron/") ||
     PUBLIC_PAGES.includes(pathname)
   ) {
     return NextResponse.next();
