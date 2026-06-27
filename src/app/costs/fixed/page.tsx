@@ -47,7 +47,7 @@ function monthlyEquivalent(amount: number, cycle: string): number {
 }
 
 export default function FixedCostsPage() {
-  const { items, loading, create, remove } =
+  const { items, loading, create, update, remove } =
     useResource<FixedCost>("/api/fixed-costs");
   const { items: stores } = useResource<Store>("/api/stores");
 
@@ -59,6 +59,16 @@ export default function FixedCostsPage() {
     billingCycle: "MONTHLY",
   });
 
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [edit, setEdit] = useState({
+    storeId: "",
+    category: "SHOPIFY",
+    name: "",
+    amount: "",
+    billingCycle: "MONTHLY",
+  });
+  const [saving, setSaving] = useState(false);
+
   async function add() {
     if (!form.name.trim() || !form.amount) return;
     await create({
@@ -69,6 +79,34 @@ export default function FixedCostsPage() {
       billingCycle: form.billingCycle,
     });
     setForm({ ...form, name: "", amount: "" });
+  }
+
+  function startEdit(i: FixedCost) {
+    setEditingId(i.id);
+    setEdit({
+      storeId: i.storeId ?? "",
+      category: i.category,
+      name: i.name,
+      amount: String(i.amount),
+      billingCycle: i.billingCycle,
+    });
+  }
+
+  async function saveEdit() {
+    if (!editingId || !edit.name.trim() || !edit.amount) return;
+    setSaving(true);
+    try {
+      await update(editingId, {
+        storeId: edit.storeId || null,
+        category: edit.category,
+        name: edit.name.trim(),
+        amount: Number(edit.amount),
+        billingCycle: edit.billingCycle,
+      });
+      setEditingId(null);
+    } finally {
+      setSaving(false);
+    }
   }
 
   const totalMonthly = items.reduce(
@@ -166,38 +204,118 @@ export default function FixedCostsPage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((i) => (
-                <tr key={i.id}>
-                  <Td className="font-medium text-slate-800">{i.name}</Td>
-                  <Td>
-                    <Badge tone="blue">
-                      {FIXED_COST_CATEGORY_LABELS[i.category] ?? i.category}
-                    </Badge>
-                  </Td>
-                  <Td className="text-slate-500">
-                    {i.store?.name ?? "Toàn công ty"}
-                  </Td>
-                  <Td className="text-right tabular-nums">
-                    {formatJPY(i.amount)}
-                  </Td>
-                  <Td className="text-slate-500">
-                    {BILLING_CYCLE_LABELS[i.billingCycle] ?? i.billingCycle}
-                  </Td>
-                  <Td className="text-right tabular-nums text-slate-500">
-                    {formatJPY(monthlyEquivalent(i.amount, i.billingCycle))}
-                  </Td>
-                  <Td className="text-right">
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        if (confirm(`Xóa "${i.name}"?`)) remove(i.id);
-                      }}
-                    >
-                      🗑️
-                    </Button>
-                  </Td>
-                </tr>
-              ))}
+              {items.map((i) =>
+                editingId === i.id ? (
+                  <tr key={i.id} className="bg-amber-50/40">
+                    <Td>
+                      <Input
+                        value={edit.name}
+                        onChange={(e) => setEdit({ ...edit, name: e.target.value })}
+                      />
+                    </Td>
+                    <Td>
+                      <Select
+                        value={edit.category}
+                        onChange={(e) => setEdit({ ...edit, category: e.target.value })}
+                      >
+                        {FIXED_COST_CATEGORIES.map((c) => (
+                          <option key={c} value={c}>
+                            {FIXED_COST_CATEGORY_LABELS[c]}
+                          </option>
+                        ))}
+                      </Select>
+                    </Td>
+                    <Td>
+                      <Select
+                        value={edit.storeId}
+                        onChange={(e) => setEdit({ ...edit, storeId: e.target.value })}
+                      >
+                        <option value="">Toàn công ty</option>
+                        {stores.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Td>
+                    <Td>
+                      <Input
+                        type="number"
+                        className="text-right"
+                        value={edit.amount}
+                        onChange={(e) => setEdit({ ...edit, amount: e.target.value })}
+                      />
+                    </Td>
+                    <Td>
+                      <Select
+                        value={edit.billingCycle}
+                        onChange={(e) => setEdit({ ...edit, billingCycle: e.target.value })}
+                      >
+                        {BILLING_CYCLES.map((c) => (
+                          <option key={c} value={c}>
+                            {BILLING_CYCLE_LABELS[c]}
+                          </option>
+                        ))}
+                      </Select>
+                    </Td>
+                    <Td className="text-right tabular-nums text-slate-500">
+                      {formatJPY(
+                        monthlyEquivalent(Number(edit.amount) || 0, edit.billingCycle)
+                      )}
+                    </Td>
+                    <Td className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button onClick={saveEdit} disabled={saving}>
+                          {saving ? "..." : "✓ Lưu"}
+                        </Button>
+                        <Button variant="ghost" onClick={() => setEditingId(null)}>
+                          ✗
+                        </Button>
+                      </div>
+                    </Td>
+                  </tr>
+                ) : (
+                  <tr key={i.id}>
+                    <Td className="font-medium text-slate-800">{i.name}</Td>
+                    <Td>
+                      <Badge tone="blue">
+                        {FIXED_COST_CATEGORY_LABELS[i.category] ?? i.category}
+                      </Badge>
+                    </Td>
+                    <Td className="text-slate-500">
+                      {i.store?.name ?? "Toàn công ty"}
+                    </Td>
+                    <Td className="text-right tabular-nums">
+                      {formatJPY(i.amount)}
+                    </Td>
+                    <Td className="text-slate-500">
+                      {BILLING_CYCLE_LABELS[i.billingCycle] ?? i.billingCycle}
+                    </Td>
+                    <Td className="text-right tabular-nums text-slate-500">
+                      {formatJPY(monthlyEquivalent(i.amount, i.billingCycle))}
+                    </Td>
+                    <Td className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="secondary"
+                          onClick={() => startEdit(i)}
+                          disabled={!!editingId}
+                        >
+                          ✏️
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            if (confirm(`Xóa "${i.name}"?`)) remove(i.id);
+                          }}
+                        >
+                          🗑️
+                        </Button>
+                      </div>
+                    </Td>
+                  </tr>
+                )
+              )}
             </tbody>
           </Table>
         )}
