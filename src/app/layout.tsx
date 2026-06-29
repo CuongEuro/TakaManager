@@ -1,10 +1,15 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
 
 export const metadata: Metadata = {
   title: "TakaManager — Quản lý dữ liệu & Marketing POD",
   description: "Hệ thống quản lý chi phí, doanh thu, lợi nhuận và tối ưu Ads cho POD.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({

@@ -63,8 +63,8 @@ export default function DashboardPage() {
           data?.timezone ?? "Asia/Tokyo"
         }.`}
         actions={
-          <div className="flex items-center gap-2">
-            <div className="flex rounded-lg border border-slate-200 bg-white p-1">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+            <div className="flex flex-wrap rounded-lg border border-slate-200 bg-white p-1">
               {PRESETS.map((p) => (
                 <button
                   key={p}
@@ -79,7 +79,7 @@ export default function DashboardPage() {
                 </button>
               ))}
             </div>
-            <div className="w-44">
+            <div className="w-full sm:w-44">
               <Select value={storeId} onChange={(e) => setStoreId(e.target.value)}>
                 <option value="">Tất cả store</option>
                 {data?.storeOptions.map((st) => (
