@@ -6,7 +6,10 @@
 // ---------------------------------------------------------------------------
 import { AdAccountCreds, AdInsight, AdsetInsight, num, ymd } from "./types";
 
-const API_VERSION = "v18";
+// Google Ads API now ships monthly and each version sunsets ~6 months after
+// release, returning HTML 404 on the old path once gone. Keep this current.
+// (v20 sunset 2026-06-10; supported as of 2026-06: v24/v23/v22/v21.)
+const API_VERSION = "v24";
 
 async function getAccessToken(creds: AdAccountCreds): Promise<string> {
   if (!creds.clientId || !creds.clientSecret || !creds.refreshToken)
