@@ -42,6 +42,21 @@ interface Campaign {
   storeId: string | null;
   status: string | null;
 }
+interface SyncResult {
+  accountId: string;
+  name: string;
+  platform: string;
+  rows: number;
+  since: string; // ISO start of the synced window
+  ok: boolean;
+  error?: string;
+}
+
+function fmtDay(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
+}
 
 const CRED_FIELDS: Record<string, { key: string; label: string }[]> = {
   FACEBOOK: [{ key: "accessToken", label: "Access Token" }],
@@ -83,6 +98,9 @@ export default function AdAccountsPage() {
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   // Sync window (days back) — keep it light, don't pull heavy old history.
   const [rangeDays, setRangeDays] = useState("7");
+  // Bulk-sync progress + per-account results (browser-driven, one account at a time).
+  const [syncProg, setSyncProg] = useState<{ done: number; total: number } | null>(null);
+  const [syncResults, setSyncResults] = useState<SyncResult[]>([]);
 
   // Campaign → store mapping panel state
   const [mapAccount, setMapAccount] = useState<AdAccount | null>(null);
@@ -210,6 +228,10 @@ export default function AdAccountsPage() {
   ) {
     setBusy(accountId + endpoint);
     setMsg(null);
+    if (endpoint === "sync") {
+      setSyncProg(null);
+      setSyncResults([]);
+    }
     try {
       const r = await fetch(`/api/ads/${endpoint}`, {
         method: "POST",
@@ -223,11 +245,11 @@ export default function AdAccountsPage() {
       if (endpoint === "test") {
         setMsg({ ok: r.ok, text: r.ok ? `✓ Kết nối OK: ${r.info}` : `✗ ${r.error}` });
       } else {
-        const res = r.results?.[0];
+        const res: SyncResult | undefined = r.results?.[0];
         setMsg({
           ok: !!res?.ok,
           text: res?.ok
-            ? `✓ Đã đồng bộ ${res.rows} dòng spend (${res.platform}).`
+            ? `✓ ${res.name}: ${res.rows} dòng dữ liệu, từ ${fmtDay(res.since)} → hôm nay (${res.platform}).`
             : `✗ ${res?.error ?? r.error}`,
         });
         await load();
@@ -238,20 +260,59 @@ export default function AdAccountsPage() {
   }
 
   async function syncAll() {
+    // Sync one account at a time from the browser → live progress, per-account
+    // results, and no single long server request that can time out.
+    const targets = items.filter((a) => a.configured && a.active);
+    if (targets.length === 0) {
+      setMsg({ ok: false, text: "Không có tài khoản đủ khoá để đồng bộ." });
+      return;
+    }
     setBusy("ALL");
     setMsg(null);
-    try {
-      const r = await fetch("/api/ads/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sinceDays: Number(rangeDays) }),
-      }).then((x) => x.json());
-      const ok = (r.results ?? []).filter((x: { ok: boolean }) => x.ok).length;
-      setMsg({ ok: ok > 0, text: `Đồng bộ ${ok}/${r.results?.length ?? 0} tài khoản.` });
-      await load();
-    } finally {
-      setBusy(null);
+    setSyncResults([]);
+    setSyncProg({ done: 0, total: targets.length });
+    const collected: SyncResult[] = [];
+    for (let i = 0; i < targets.length; i++) {
+      const a = targets[i];
+      try {
+        const r = await fetch("/api/ads/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountId: a.id, sinceDays: Number(rangeDays) }),
+        }).then((x) => x.json());
+        const res: SyncResult | undefined = r.results?.[0];
+        collected.push(
+          res ?? {
+            accountId: a.id,
+            name: a.name,
+            platform: a.platform,
+            rows: 0,
+            since: "",
+            ok: false,
+            error: r.error ?? "Không có kết quả trả về",
+          }
+        );
+      } catch (e) {
+        collected.push({
+          accountId: a.id,
+          name: a.name,
+          platform: a.platform,
+          rows: 0,
+          since: "",
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+      setSyncResults([...collected]);
+      setSyncProg({ done: i + 1, total: targets.length });
     }
+    const ok = collected.filter((r) => r.ok).length;
+    setMsg({
+      ok: ok === targets.length,
+      text: `Hoàn tất: ${ok}/${targets.length} tài khoản thành công.`,
+    });
+    setBusy(null);
+    await load();
   }
 
   return (
@@ -275,8 +336,10 @@ export default function AdAccountsPage() {
                 </Select>
               </Field>
             </div>
-            <Button onClick={syncAll} disabled={busy === "ALL"}>
-              {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
+            <Button onClick={syncAll} disabled={!!busy}>
+              {busy === "ALL" && syncProg
+                ? `Đang đồng bộ ${syncProg.done}/${syncProg.total}...`
+                : "🔄 Đồng bộ tất cả"}
             </Button>
           </div>
         }
@@ -290,6 +353,67 @@ export default function AdAccountsPage() {
         >
           {msg.text}
         </div>
+      )}
+
+      {(syncProg || syncResults.length > 0) && (
+        <Card className="mb-6">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold text-slate-700">
+              Kết quả đồng bộ{" "}
+              {syncProg ? `· ${syncProg.done}/${syncProg.total} tài khoản` : ""}
+            </div>
+            {!busy && (
+              <button
+                onClick={() => {
+                  setSyncResults([]);
+                  setSyncProg(null);
+                }}
+                className="text-sm text-slate-400 hover:text-slate-600"
+              >
+                ✗ Đóng
+              </button>
+            )}
+          </div>
+          {syncProg && (
+            <div className="mb-3 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+              <div
+                className="h-full bg-brand-500 transition-all"
+                style={{ width: `${(syncProg.done / syncProg.total) * 100}%` }}
+              />
+            </div>
+          )}
+          <div className="space-y-1">
+            {syncResults.map((r) => (
+              <div
+                key={r.accountId}
+                className="flex items-center justify-between gap-3 rounded-md px-3 py-1.5 text-sm odd:bg-slate-50"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <span>{r.ok ? "✅" : "❌"}</span>
+                  <span className="truncate font-medium text-slate-700">{r.name}</span>
+                  <Badge tone="blue">
+                    {AD_PLATFORM_LABELS[r.platform] ?? r.platform}
+                  </Badge>
+                </span>
+                <span
+                  className={`max-w-[55%] truncate text-right ${
+                    r.ok ? "text-slate-500" : "text-rose-600"
+                  }`}
+                  title={r.ok ? "" : r.error}
+                >
+                  {r.ok
+                    ? `${r.rows} dòng · từ ${fmtDay(r.since)} → nay`
+                    : r.error}
+                </span>
+              </div>
+            ))}
+            {busy === "ALL" && syncProg && syncProg.done < syncProg.total && (
+              <div className="px-3 py-1.5 text-sm text-slate-400">
+                Đang xử lý tài khoản tiếp theo…
+              </div>
+            )}
+          </div>
+        </Card>
       )}
 
       {editAccount && (
