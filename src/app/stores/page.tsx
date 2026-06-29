@@ -54,9 +54,61 @@ function pagePct(page: number, cap = 92): number {
   return Math.min(cap, Math.round(cap * (1 - Math.pow(0.78, page))));
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+class FatalSyncError extends Error {} // never retried (e.g. deploy not ready)
+
+/** Fetch ONE page. Throws on any non-OK result so the caller can retry. */
+async function fetchSyncPage(body: Record<string, unknown>): Promise<PageResp> {
+  const res = await fetch("/api/shopify/sync/page", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 404) {
+    throw new FatalSyncError(
+      "Phiên bản mới chưa sẵn sàng (HTTP 404). Chờ Vercel deploy 'Ready' rồi " +
+        "tải lại trang (Ctrl+Shift+R) và thử lại."
+    );
+  }
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error ?? `HTTP ${res.status}`);
+  }
+  const r: PageResp = await res.json();
+  if (!r.ok) throw new Error(r.error ?? "Lỗi không xác định");
+  return r;
+}
+
+/** Fetch a page with auto-retry. Re-requesting the SAME cursor is idempotent
+ *  (server upserts by order id), so transient Shopify errors (502 / throttle /
+ *  network blips) recover instead of aborting the whole sync. */
+async function fetchSyncPageRetry(
+  body: Record<string, unknown>,
+  onRetry: (attempt: number, err: string) => void,
+  attempts = 5
+): Promise<PageResp> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fetchSyncPage(body);
+    } catch (e) {
+      if (e instanceof FatalSyncError) throw e; // don't retry
+      lastErr = e;
+      if (i < attempts) {
+        onRetry(i, e instanceof Error ? e.message : String(e));
+        await sleep(1000 * i); // linear backoff: 1s, 2s, 3s, 4s
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 /** Sync ONE store by looping the per-page endpoint until done. Each request is
- *  small, so it can never hit the serverless time limit. `prefix` labels the
- *  progress message (used when syncing several stores). */
+ *  small (so it can never hit the serverless time limit) and auto-retries on
+ *  transient failure. `prefix` labels the progress message. */
 async function syncStorePaged(
   storeId: string,
   sincePayload: Record<string, unknown>,
@@ -72,28 +124,18 @@ async function syncStorePaged(
   let orders = 0;
   let page = 0;
   let total: number | null = null;
+  let lastPct = basePercent;
   // hard cap pages to avoid an infinite loop on a misbehaving cursor
-  for (page = 1; page <= 4000; page++) {
+  for (page = 1; page <= 8000; page++) {
     const body: Record<string, unknown> = cursor
       ? { storeId, since, cursor, useJourney }
       : { storeId, ...sincePayload };
-    const res = await fetch("/api/shopify/sync/page", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (res.status === 404) {
-      throw new Error(
-        "Phiên bản mới chưa sẵn sàng (HTTP 404). Chờ Vercel deploy 'Ready' rồi " +
-          "tải lại trang (Ctrl+Shift+R) và thử lại."
-      );
-    }
-    if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      throw new Error(e.error ?? `HTTP ${res.status}`);
-    }
-    const r: PageResp = await res.json();
-    if (!r.ok) throw new Error(r.error ?? "Lỗi không xác định");
+    const r = await fetchSyncPageRetry(body, (attempt, err) =>
+      onProgress({
+        percent: lastPct,
+        message: `${prefix}lỗi tạm thời, đang thử lại lần ${attempt}… (${err})`,
+      })
+    );
 
     products += r.pageProducts;
     orders += r.pageOrders;
@@ -107,9 +149,12 @@ async function syncStorePaged(
       total && total > 0
         ? Math.min(0.99, orders / total)
         : pagePct(page) / 100;
-    const pct = basePercent + Math.round(span * fraction);
+    lastPct = basePercent + Math.round(span * fraction);
     const totalNote = total && total > 0 ? `/${total}` : "";
-    onProgress({ percent: pct, message: `${prefix}đã xử lý ${orders}${totalNote} đơn…` });
+    onProgress({
+      percent: lastPct,
+      message: `${prefix}đã xử lý ${orders}${totalNote} đơn…`,
+    });
 
     if (!r.hasNext) break;
   }
@@ -361,6 +406,8 @@ export default function StoresPage() {
                   <option value="7">7 ngày qua</option>
                   <option value="30">30 ngày qua</option>
                   <option value="60">60 ngày qua</option>
+                  <option value="90">90 ngày qua</option>
+                  <option value="365">1 năm qua</option>
                   <option value="custom">Từ ngày cụ thể…</option>
                 </Select>
               </Field>

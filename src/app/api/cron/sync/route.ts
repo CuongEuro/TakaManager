@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { syncAllAdAccounts } from "@/lib/adsync";
+import { syncAllStores } from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // Hobby caps at 60s; light 7-day window keeps it short
 
-// Daily Vercel Cron entry point. Pulls a LIGHT recent window (7 days) of ad spend
-// for every organization's accounts. Secured by CRON_SECRET: Vercel automatically
-// sends `Authorization: Bearer <CRON_SECRET>` when that env var is set.
+// Daily Vercel Cron entry point. Pulls a LIGHT recent window (7 days) for every
+// organization: ad spend (Meta/Google/X) AND Shopify orders. The Shopify pass is
+// a safety net — it catches anything a missed webhook or a failed manual sync
+// left behind (idempotent upserts → no duplicates). Secured by CRON_SECRET:
+// Vercel automatically sends `Authorization: Bearer <CRON_SECRET>` when set.
 async function handle(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (!secret)
@@ -20,13 +23,26 @@ async function handle(req: NextRequest) {
 
   const orgs = await prisma.organization.findMany({ select: { id: true } });
   let accounts = 0;
-  let ok = 0;
+  let adOk = 0;
+  let stores = 0;
+  let storeOk = 0;
   for (const org of orgs) {
-    const results = await syncAllAdAccounts(org.id, { sinceDays: 7 });
-    accounts += results.length;
-    ok += results.filter((r) => r.ok).length;
+    const adResults = await syncAllAdAccounts(org.id, { sinceDays: 7 });
+    accounts += adResults.length;
+    adOk += adResults.filter((r) => r.ok).length;
+
+    const storeResults = await syncAllStores(org.id, { sinceDays: 7 });
+    stores += storeResults.length;
+    storeOk += storeResults.filter((r) => r.ok).length;
   }
-  return NextResponse.json({ ok: true, orgs: orgs.length, accounts, synced: ok });
+  return NextResponse.json({
+    ok: true,
+    orgs: orgs.length,
+    accounts,
+    adSynced: adOk,
+    stores,
+    storesSynced: storeOk,
+  });
 }
 
 // Vercel Cron uses GET; allow POST too for manual triggering with the secret.
