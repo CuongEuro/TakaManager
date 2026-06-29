@@ -107,6 +107,9 @@ model AdAccount {
   externalId   String    // ad account id: act_xxx / Google customer id / X account id
   active       Boolean   @default(true)
   lastSyncedAt DateTime?
+  // Consumption/VAT rate added on top of platform spend (JP default 10%).
+  // Stored as a fraction: 0.1 = 10%. Applied to AdSpend.spend at sync time.
+  taxRate      Float     @default(0.1)
 
   // Meta: accessToken. X: accessToken + accessSecret + apiKey + apiSecret.
   accessToken    String?

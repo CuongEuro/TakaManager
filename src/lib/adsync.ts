@@ -301,12 +301,17 @@ export async function syncAdAccount(
       }
     }
 
+    // Platform spend is pre-tax; the real cost billed includes consumption/VAT.
+    // Apply the account's tax rate to the stored cost (JP default 10%).
+    const taxMultiplier = 1 + (a.taxRate ?? 0);
+
     // Rebuild this account's API rows for the window: delete then insert, so a
     // changed campaign→store mapping never leaves stale rows under the old store.
     await prisma.adSpend.deleteMany({
       where: { accountId: a.id, source: "API", date: { gte: since } },
     });
     for (const [dedupeKey, row] of agg) {
+      const spend = row.spend * taxMultiplier;
       await prisma.adSpend.upsert({
         where: { dedupeKey },
         create: {
@@ -316,7 +321,7 @@ export async function syncAdAccount(
           platform: a.platform,
           date: row.date,
           campaignName: row.campaignName,
-          spend: row.spend,
+          spend,
           impressions: row.impressions,
           clicks: row.clicks,
           conversions: row.conversions,
@@ -328,7 +333,7 @@ export async function syncAdAccount(
           storeId: row.storeId,
           accountId: a.id,
           date: row.date,
-          spend: row.spend,
+          spend,
           impressions: row.impressions,
           clicks: row.clicks,
           conversions: row.conversions,

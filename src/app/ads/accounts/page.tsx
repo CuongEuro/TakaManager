@@ -25,6 +25,7 @@ interface AdAccount {
   name: string;
   externalId: string;
   active: boolean;
+  taxRate: number;
   lastSyncedAt: string | null;
   configured: boolean;
   campaignCount: number;
@@ -76,6 +77,7 @@ export default function AdAccountsPage() {
   const [storeId, setStoreId] = useState("");
   const [name, setName] = useState("");
   const [externalId, setExternalId] = useState("");
+  const [tax, setTax] = useState("10"); // % thuế, mặc định 10%
   const [creds, setCreds] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -91,7 +93,12 @@ export default function AdAccountsPage() {
 
   // Edit-account panel state
   const [editAccount, setEditAccount] = useState<AdAccount | null>(null);
-  const [editForm, setEditForm] = useState({ storeId: "", name: "", externalId: "" });
+  const [editForm, setEditForm] = useState({
+    storeId: "",
+    name: "",
+    externalId: "",
+    tax: "",
+  });
   const [editCreds, setEditCreds] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
 
@@ -102,6 +109,7 @@ export default function AdAccountsPage() {
       storeId: a.storeId ?? "",
       name: a.name,
       externalId: a.externalId,
+      tax: String(+((a.taxRate ?? 0) * 100).toFixed(2)),
     });
     setEditCreds({});
   }
@@ -122,6 +130,7 @@ export default function AdAccountsPage() {
           storeId: editForm.storeId || null,
           name: editForm.name.trim(),
           externalId: editForm.externalId.trim(),
+          taxRate: (Number(editForm.tax) || 0) / 100,
           ...creds,
         }),
       });
@@ -186,10 +195,12 @@ export default function AdAccountsPage() {
       storeId: storeId || null,
       name: name.trim(),
       externalId: externalId.trim(),
+      taxRate: (Number(tax) || 0) / 100,
       ...creds,
     });
     setName("");
     setExternalId("");
+    setTax("10");
     setCreds({});
   }
 
@@ -320,6 +331,14 @@ export default function AdAccountsPage() {
                 onChange={(e) => setEditForm({ ...editForm, externalId: e.target.value })}
               />
             </Field>
+            <Field label="Thuế (%)">
+              <Input
+                type="number"
+                value={editForm.tax}
+                onChange={(e) => setEditForm({ ...editForm, tax: e.target.value })}
+                placeholder="10"
+              />
+            </Field>
           </div>
           <div className="mt-3 grid gap-3 md:grid-cols-3">
             {(CRED_FIELDS[editAccount.platform] ?? []).map((f) => (
@@ -337,7 +356,8 @@ export default function AdAccountsPage() {
           <div className="mt-4 flex items-center justify-between">
             <p className="text-xs text-slate-400">
               Khoá để trống sẽ giữ nguyên giá trị cũ. Đổi Store ở đây = store mặc định
-              cho các campaign chưa gán riêng.
+              cho các campaign chưa gán riêng. Đổi <b>Thuế (%)</b> → bấm <b>Sync</b> lại
+              để áp dụng vào chi phí.
             </p>
             <div className="flex gap-2">
               <Button variant="secondary" onClick={() => setEditAccount(null)}>
@@ -451,6 +471,17 @@ export default function AdAccountsPage() {
           </Field>
         </div>
 
+        <div className="mt-3 grid gap-3 md:grid-cols-4">
+          <Field label="Thuế (%)">
+            <Input
+              type="number"
+              value={tax}
+              onChange={(e) => setTax(e.target.value)}
+              placeholder="10"
+            />
+          </Field>
+        </div>
+
         <div className="mt-3 grid gap-3 md:grid-cols-3">
           {CRED_FIELDS[platform].map((f) => (
             <Field key={f.key} label={f.label}>
@@ -488,6 +519,7 @@ export default function AdAccountsPage() {
                 <Th>Tên</Th>
                 <Th>Account ID</Th>
                 <Th>Store</Th>
+                <Th>Thuế</Th>
                 <Th>Cấu hình</Th>
                 <Th>Sync lần cuối</Th>
                 <Th className="text-right">Thao tác</Th>
@@ -514,6 +546,9 @@ export default function AdAccountsPage() {
                         <Badge tone="amber">Chưa gán campaign nào</Badge>
                       )}
                     </div>
+                  </Td>
+                  <Td className="text-slate-500">
+                    {(a.taxRate * 100).toFixed(a.taxRate * 100 % 1 === 0 ? 0 : 1)}%
                   </Td>
                   <Td>
                     {a.configured ? (

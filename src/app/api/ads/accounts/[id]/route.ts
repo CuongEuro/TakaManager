@@ -21,6 +21,7 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
       name: b.name != null ? String(b.name) : undefined,
       externalId: b.externalId != null ? String(b.externalId) : undefined,
       active: b.active ?? undefined,
+      taxRate: b.taxRate != null ? Number(b.taxRate) : undefined,
       accessToken: secret(b.accessToken),
       accessSecret: secret(b.accessSecret),
       apiKey: secret(b.apiKey),
