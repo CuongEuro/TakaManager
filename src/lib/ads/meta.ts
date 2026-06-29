@@ -4,7 +4,10 @@
 // ---------------------------------------------------------------------------
 import { AdAccountCreds, AdInsight, AdsetInsight, num, ymd } from "./types";
 
-const API_VERSION = "v21.0";
+// Meta deprecates each Graph/Marketing API version ~2 years after release.
+// Keep current to avoid a hard cutoff. (v20 deprecates 2026-09-24; latest is
+// v25 as of 2026-06. Insights fields used here are stable across versions.)
+const API_VERSION = "v23.0";
 const PURCHASE_KEYS = ["purchase", "omni_purchase"];
 
 interface MetaRow {
