@@ -58,6 +58,61 @@ function fmtDay(iso: string): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function startOfDay(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+// Calendar date (YYYY-MM-DD) in the BROWSER's local tz — not UTC — so day
+// boundaries match what the user sees and align with server-side bucketing.
+const dayStr = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+
+/** Split [from, to] into ≤maxDays day-aligned chunks (oldest → newest). Long
+ * windows are synced chunk-by-chunk so no single request times out. */
+function buildChunks(
+  from: Date,
+  to: Date,
+  maxDays = 30
+): { since: Date; until: Date }[] {
+  const chunks: { since: Date; until: Date }[] = [];
+  let s = startOfDay(from);
+  const end = startOfDay(to);
+  while (s.getTime() <= end.getTime()) {
+    const u = new Date(s);
+    u.setDate(u.getDate() + maxDays - 1);
+    if (u.getTime() > end.getTime()) u.setTime(end.getTime());
+    chunks.push({ since: new Date(s), until: new Date(u) });
+    s = new Date(u);
+    s.setDate(s.getDate() + 1);
+  }
+  return chunks;
+}
+
+/** Resolve the {from,to} window from the picker (preset days or custom dates). */
+function resolveRange(
+  rangeDays: string,
+  customFrom: string,
+  customTo: string
+): { from: Date; to: Date } | null {
+  if (rangeDays === "custom") {
+    if (!customFrom || !customTo) return null;
+    const from = new Date(customFrom);
+    const to = new Date(customTo);
+    if (isNaN(from.getTime()) || isNaN(to.getTime()) || from > to) return null;
+    return { from, to };
+  }
+  const days = Number(rangeDays);
+  return { from: new Date(Date.now() - days * 86400000), to: new Date() };
+}
+
 const CRED_FIELDS: Record<string, { key: string; label: string }[]> = {
   FACEBOOK: [{ key: "accessToken", label: "Access Token" }],
   GOOGLE: [
@@ -96,8 +151,12 @@ export default function AdAccountsPage() {
   const [creds, setCreds] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
-  // Sync window (days back) — keep it light, don't pull heavy old history.
+  // Sync window. Presets are "days back"; "custom" uses the date inputs below.
   const [rangeDays, setRangeDays] = useState("7");
+  const [customFrom, setCustomFrom] = useState(() =>
+    dayStr(new Date(Date.now() - 90 * 86400000))
+  );
+  const [customTo, setCustomTo] = useState(() => dayStr(new Date()));
   // Bulk-sync progress + per-account results (browser-driven, one account at a time).
   const [syncProg, setSyncProg] = useState<{ done: number; total: number } | null>(null);
   const [syncResults, setSyncResults] = useState<SyncResult[]>([]);
@@ -222,46 +281,124 @@ export default function AdAccountsPage() {
     setCreds({});
   }
 
-  async function action(
-    endpoint: "test" | "sync",
-    accountId: string
-  ) {
-    setBusy(accountId + endpoint);
+  async function testAccount(accountId: string) {
+    setBusy(accountId + "test");
     setMsg(null);
-    if (endpoint === "sync") {
-      setSyncProg(null);
-      setSyncResults([]);
-    }
     try {
-      const r = await fetch(`/api/ads/${endpoint}`, {
+      const r = await fetch("/api/ads/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          endpoint === "sync"
-            ? { accountId, sinceDays: Number(rangeDays) }
-            : { accountId }
-        ),
+        body: JSON.stringify({ accountId }),
       }).then((x) => x.json());
-      if (endpoint === "test") {
-        setMsg({ ok: r.ok, text: r.ok ? `✓ Kết nối OK: ${r.info}` : `✗ ${r.error}` });
-      } else {
-        const res: SyncResult | undefined = r.results?.[0];
-        setMsg({
-          ok: !!res?.ok,
-          text: res?.ok
-            ? `✓ ${res.name}: ${res.rows} dòng dữ liệu, từ ${fmtDay(res.since)} → hôm nay (${res.platform}).`
-            : `✗ ${res?.error ?? r.error}`,
-        });
-        await load();
-      }
+      setMsg({ ok: r.ok, text: r.ok ? `✓ Kết nối OK: ${r.info}` : `✗ ${r.error}` });
     } finally {
       setBusy(null);
     }
   }
 
+  // Sync ONE chunk (a sub-window) with auto-retry. Throws if it keeps failing.
+  async function syncChunkRetry(
+    accountId: string,
+    since: Date,
+    until: Date,
+    attempts = 3
+  ): Promise<SyncResult> {
+    let lastErr: unknown;
+    for (let i = 1; i <= attempts; i++) {
+      try {
+        const r = await fetch("/api/ads/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            accountId,
+            since: dayStr(since), // calendar dates → server buckets by day
+            until: dayStr(until),
+          }),
+        }).then((x) => x.json());
+        const res: SyncResult | undefined = r.results?.[0];
+        if (!res || !res.ok) throw new Error(res?.error ?? r.error ?? "Đồng bộ lỗi");
+        return res;
+      } catch (e) {
+        lastErr = e;
+        if (i < attempts) await sleep(700 * i); // backoff before auto-retry
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
+
+  // Sync one account over [from,to] by chunking. Failed chunks auto-retry; if a
+  // chunk still fails it is reported but other chunks proceed (no data loss for
+  // the parts that succeeded — each chunk is idempotent server-side).
+  async function syncAccountRange(
+    a: AdAccount,
+    from: Date,
+    to: Date,
+    onStep: () => void
+  ): Promise<SyncResult> {
+    let rows = 0;
+    let ok = true;
+    let error: string | undefined;
+    for (const c of buildChunks(from, to)) {
+      try {
+        const res = await syncChunkRetry(a.id, c.since, c.until);
+        rows += res.rows;
+      } catch (e) {
+        ok = false;
+        const m = e instanceof Error ? e.message : String(e);
+        error = `Lỗi khoảng ${fmtDay(c.since.toISOString())}–${fmtDay(
+          c.until.toISOString()
+        )}: ${m}`;
+      }
+      onStep();
+    }
+    return {
+      accountId: a.id,
+      name: a.name,
+      platform: a.platform,
+      rows,
+      since: from.toISOString(),
+      ok,
+      error,
+    };
+  }
+
+  async function syncOne(a: AdAccount) {
+    const range = resolveRange(rangeDays, customFrom, customTo);
+    if (!range) {
+      setMsg({ ok: false, text: "Chọn 'Từ ngày' và 'Đến ngày' hợp lệ." });
+      return;
+    }
+    setBusy(a.id + "sync");
+    setMsg(null);
+    setSyncResults([]);
+    const total = buildChunks(range.from, range.to).length;
+    let done = 0;
+    setSyncProg({ done: 0, total });
+    const res = await syncAccountRange(a, range.from, range.to, () => {
+      done++;
+      setSyncProg({ done, total });
+    });
+    setSyncResults([res]);
+    setMsg({
+      ok: res.ok,
+      text: res.ok
+        ? `✓ ${res.name}: ${res.rows} dòng, từ ${fmtDay(
+            range.from.toISOString()
+          )} → ${fmtDay(range.to.toISOString())} (${res.platform}).`
+        : `✗ ${res.error}`,
+    });
+    setBusy(null);
+    await load();
+  }
+
   async function syncAll() {
-    // Sync one account at a time from the browser → live progress, per-account
-    // results, and no single long server request that can time out.
+    // Browser-driven: each account synced chunk-by-chunk with auto-retry → live
+    // progress, per-account results, no long single request that can time out.
+    const range = resolveRange(rangeDays, customFrom, customTo);
+    if (!range) {
+      setMsg({ ok: false, text: "Chọn 'Từ ngày' và 'Đến ngày' hợp lệ." });
+      return;
+    }
     const targets = items.filter((a) => a.configured && a.active);
     if (targets.length === 0) {
       setMsg({ ok: false, text: "Không có tài khoản đủ khoá để đồng bộ." });
@@ -270,46 +407,25 @@ export default function AdAccountsPage() {
     setBusy("ALL");
     setMsg(null);
     setSyncResults([]);
-    setSyncProg({ done: 0, total: targets.length });
+    const chunksPer = buildChunks(range.from, range.to).length;
+    const total = targets.length * chunksPer;
+    let done = 0;
+    setSyncProg({ done: 0, total });
     const collected: SyncResult[] = [];
-    for (let i = 0; i < targets.length; i++) {
-      const a = targets[i];
-      try {
-        const r = await fetch("/api/ads/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ accountId: a.id, sinceDays: Number(rangeDays) }),
-        }).then((x) => x.json());
-        const res: SyncResult | undefined = r.results?.[0];
-        collected.push(
-          res ?? {
-            accountId: a.id,
-            name: a.name,
-            platform: a.platform,
-            rows: 0,
-            since: "",
-            ok: false,
-            error: r.error ?? "Không có kết quả trả về",
-          }
-        );
-      } catch (e) {
-        collected.push({
-          accountId: a.id,
-          name: a.name,
-          platform: a.platform,
-          rows: 0,
-          since: "",
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
+    for (const a of targets) {
+      const res = await syncAccountRange(a, range.from, range.to, () => {
+        done++;
+        setSyncProg({ done, total });
+      });
+      collected.push(res);
       setSyncResults([...collected]);
-      setSyncProg({ done: i + 1, total: targets.length });
     }
     const ok = collected.filter((r) => r.ok).length;
     setMsg({
       ok: ok === targets.length,
-      text: `Hoàn tất: ${ok}/${targets.length} tài khoản thành công.`,
+      text: `Hoàn tất: ${ok}/${targets.length} tài khoản · ${fmtDay(
+        range.from.toISOString()
+      )} → ${fmtDay(range.to.toISOString())}.`,
     });
     setBusy(null);
     await load();
@@ -321,8 +437,8 @@ export default function AdAccountsPage() {
         title="Kết nối Ads"
         subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Tài khoản chạy cho 1 store → chọn Store khi thêm. Tài khoản dùng chung nhiều store (hay gặp ở Meta) → để 'Chung' rồi bấm 'Gán store' cho từng campaign."
         actions={
-          <div className="flex items-end gap-2">
-            <div className="w-36">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="w-40">
               <Field label="Kéo dữ liệu">
                 <Select
                   value={rangeDays}
@@ -333,9 +449,39 @@ export default function AdAccountsPage() {
                   <option value="1">Hôm qua → nay</option>
                   <option value="7">7 ngày</option>
                   <option value="30">30 ngày</option>
+                  <option value="60">60 ngày</option>
+                  <option value="90">90 ngày</option>
+                  <option value="365">1 năm</option>
+                  <option value="custom">Tuỳ chọn ngày…</option>
                 </Select>
               </Field>
             </div>
+            {rangeDays === "custom" && (
+              <>
+                <div className="w-40">
+                  <Field label="Từ ngày">
+                    <Input
+                      type="date"
+                      value={customFrom}
+                      max={customTo}
+                      onChange={(e) => setCustomFrom(e.target.value)}
+                      disabled={!!busy}
+                    />
+                  </Field>
+                </div>
+                <div className="w-40">
+                  <Field label="Đến ngày">
+                    <Input
+                      type="date"
+                      value={customTo}
+                      max={dayStr(new Date())}
+                      onChange={(e) => setCustomTo(e.target.value)}
+                      disabled={!!busy}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
             <Button onClick={syncAll} disabled={!!busy}>
               {busy === "ALL" && syncProg
                 ? `Đang đồng bộ ${syncProg.done}/${syncProg.total}...`
@@ -360,7 +506,7 @@ export default function AdAccountsPage() {
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-semibold text-slate-700">
               Kết quả đồng bộ{" "}
-              {syncProg ? `· ${syncProg.done}/${syncProg.total} tài khoản` : ""}
+              {syncProg ? `· ${syncProg.done}/${syncProg.total} phần` : ""}
             </div>
             {!busy && (
               <button
@@ -704,14 +850,14 @@ export default function AdAccountsPage() {
                       </Button>
                       <Button
                         variant="secondary"
-                        onClick={() => action("test", a.id)}
-                        disabled={!a.configured || busy === a.id + "test"}
+                        onClick={() => testAccount(a.id)}
+                        disabled={!a.configured || !!busy}
                       >
-                        Test
+                        {busy === a.id + "test" ? "..." : "Test"}
                       </Button>
                       <Button
-                        onClick={() => action("sync", a.id)}
-                        disabled={!a.configured || busy === a.id + "sync"}
+                        onClick={() => syncOne(a)}
+                        disabled={!a.configured || !!busy}
                       >
                         {busy === a.id + "sync" ? "..." : "Sync"}
                       </Button>

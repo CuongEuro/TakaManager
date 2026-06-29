@@ -48,27 +48,35 @@ function toCreds(a: AdAccountRow): AdAccountCreds {
   };
 }
 
-function fetchInsights(creds: AdAccountCreds, since: Date): Promise<AdInsight[]> {
+function fetchInsights(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date
+): Promise<AdInsight[]> {
   switch (creds.platform) {
     case "FACEBOOK":
-      return fetchMetaInsights(creds, since);
+      return fetchMetaInsights(creds, since, until);
     case "GOOGLE":
-      return fetchGoogleInsights(creds, since);
+      return fetchGoogleInsights(creds, since, until);
     case "TWITTER":
-      return fetchTwitterInsights(creds, since);
+      return fetchTwitterInsights(creds, since, until);
     default:
       throw new Error(`Nền tảng không hỗ trợ: ${creds.platform}`);
   }
 }
 
-function fetchAdsets(creds: AdAccountCreds, since: Date): Promise<AdsetInsight[]> {
+function fetchAdsets(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date
+): Promise<AdsetInsight[]> {
   switch (creds.platform) {
     case "FACEBOOK":
-      return fetchMetaAdsets(creds, since);
+      return fetchMetaAdsets(creds, since, until);
     case "GOOGLE":
-      return fetchGoogleAdsets(creds, since);
+      return fetchGoogleAdsets(creds, since, until);
     case "TWITTER":
-      return fetchTwitterAdsets(creds, since);
+      return fetchTwitterAdsets(creds, since, until);
     default:
       throw new Error(`Nền tảng không hỗ trợ: ${creds.platform}`);
   }
@@ -210,28 +218,39 @@ export interface AdSyncResult {
 export async function syncAdAccount(
   accountId: string,
   organizationId: string,
-  opts: { sinceDays?: number } = {}
+  opts: {
+    sinceDays?: number;
+    since?: string | Date; // explicit window start (chunked / custom range)
+    until?: string | Date; // explicit window end (defaults to today)
+  } = {}
 ): Promise<AdSyncResult> {
   const a = await prisma.adAccount.findUnique({ where: { id: accountId } });
   if (!a || a.organizationId !== organizationId)
     throw new Error("Không tìm thấy tài khoản");
 
-  // sinceDays may be 0 ("Hôm nay") → use != null, not a truthy check.
+  // Window resolution. Explicit since/until (from chunked or custom-range sync)
+  // wins; else sinceDays (0 = today is valid → use != null); else incremental.
+  const until = opts.until != null ? parseDay(opts.until) : new Date();
   const since =
-    opts.sinceDays != null
+    opts.since != null
+      ? parseDay(opts.since)
+      : opts.sinceDays != null
       ? daysAgo(opts.sinceDays)
       : a.lastSyncedAt
       ? new Date(a.lastSyncedAt.getTime() - 2 * 86400000)
       : daysAgo(7);
+  // Day-aligned bounds for the idempotent delete (stored dates are local midnight).
+  const winStart = startOfDay(since);
+  const winEnd = endOfDay(until);
 
   try {
     const creds = toCreds(a);
-    const insights = await fetchInsights(creds, since);
+    const insights = await fetchInsights(creds, since, until);
 
     // Deep hierarchy FIRST so campaign entities exist (they are the mapping
     // target). syncHierarchy's update only touches name → a user's campaign→store
     // mapping (AdEntity.storeId) is preserved across re-syncs.
-    const adsetRows = await fetchAdsets(creds, since);
+    const adsetRows = await fetchAdsets(creds, since, until);
     const adsets = await syncHierarchy(
       {
         id: a.id,
@@ -241,6 +260,29 @@ export async function syncAdAccount(
       },
       adsetRows
     );
+
+    // Ensure a CAMPAIGN entity exists for every campaign that has spend (even if
+    // the deep adset fetch returned nothing for it) so attribution can map it.
+    // update touches name only → preserves the user's campaign→store mapping.
+    const insightCampaigns = new Map<string, string | null>();
+    for (const ins of insights)
+      if (ins.campaignExternalId)
+        insightCampaigns.set(ins.campaignExternalId, ins.campaignName);
+    for (const [externalId, name] of insightCampaigns) {
+      await prisma.adEntity.upsert({
+        where: { accountId_externalId: { accountId: a.id, externalId } },
+        create: {
+          organizationId: a.organizationId,
+          accountId: a.id,
+          storeId: a.storeId,
+          platform: a.platform,
+          level: "CAMPAIGN",
+          externalId,
+          name: name ?? "(unknown)",
+        },
+        update: name ? { name } : {},
+      });
+    }
 
     // Campaign → store mapping (campaign-level attribution). A spend row's store
     // is the campaign's mapped store, else the account's store (Google/Twitter =
@@ -308,7 +350,11 @@ export async function syncAdAccount(
     // Rebuild this account's API rows for the window: delete then insert, so a
     // changed campaign→store mapping never leaves stale rows under the old store.
     await prisma.adSpend.deleteMany({
-      where: { accountId: a.id, source: "API", date: { gte: since } },
+      where: {
+        accountId: a.id,
+        source: "API",
+        date: { gte: winStart, lte: winEnd },
+      },
     });
     for (const [dedupeKey, row] of agg) {
       const spend = row.spend * taxMultiplier;
@@ -386,4 +432,24 @@ export async function syncAllAdAccounts(
 
 function daysAgo(n: number): Date {
   return new Date(Date.now() - n * 86400000);
+}
+
+// Parse a window bound. A date-only "YYYY-MM-DD" is read as LOCAL midnight (not
+// UTC, which is JS's default for bare dates) so it lines up with how daily ad
+// rows are stored (`${ymd}T00:00:00` local). Full ISO / Date pass through.
+function parseDay(v: string | Date): Date {
+  if (v instanceof Date) return v;
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00`) : new Date(v);
+}
+
+function startOfDay(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function endOfDay(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
 }

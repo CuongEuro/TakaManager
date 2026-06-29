@@ -44,14 +44,15 @@ export async function testMeta(creds: AdAccountCreds): Promise<string> {
 
 export async function fetchMetaInsights(
   creds: AdAccountCreds,
-  since: Date
+  since: Date,
+  until: Date = new Date()
 ): Promise<AdInsight[]> {
   if (!creds.accessToken) throw new Error("Meta: thiếu access token");
   const acct = creds.externalId.startsWith("act_")
     ? creds.externalId
     : `act_${creds.externalId}`;
 
-  const timeRange = JSON.stringify({ since: ymd(since), until: ymd(new Date()) });
+  const timeRange = JSON.stringify({ since: ymd(since), until: ymd(until) });
   const params = new URLSearchParams({
     level: "campaign",
     time_increment: "1",
@@ -100,7 +101,8 @@ interface MetaAdsetRow extends MetaRow {
 /** Deep fetch: ad set × day insights, carrying parent campaign id/name. */
 export async function fetchMetaAdsets(
   creds: AdAccountCreds,
-  since: Date
+  since: Date,
+  until: Date = new Date()
 ): Promise<AdsetInsight[]> {
   if (!creds.accessToken) throw new Error("Meta: thiếu access token");
   const acct = creds.externalId.startsWith("act_")
@@ -112,7 +114,7 @@ export async function fetchMetaAdsets(
     time_increment: "1",
     fields:
       "campaign_id,campaign_name,adset_id,adset_name,spend,impressions,clicks,actions,action_values",
-    time_range: JSON.stringify({ since: ymd(since), until: ymd(new Date()) }),
+    time_range: JSON.stringify({ since: ymd(since), until: ymd(until) }),
     limit: "500",
     access_token: creds.accessToken,
   });

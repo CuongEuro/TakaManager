@@ -12,10 +12,15 @@ export async function POST(req: NextRequest) {
   // sinceDays may be 0 ("Hôm nay") → only treat null/undefined as "not provided".
   const sinceDays =
     b.sinceDays !== undefined && b.sinceDays !== null ? Number(b.sinceDays) : undefined;
+  // Explicit window (chunked / custom range). ISO date strings.
+  const since = b.since ? String(b.since) : undefined;
+  const until = b.until ? String(b.until) : undefined;
   try {
     if (b.accountId) {
       const result = await syncAdAccount(String(b.accountId), session.oid, {
         sinceDays,
+        since,
+        until,
       });
       return NextResponse.json({ results: [result] });
     }

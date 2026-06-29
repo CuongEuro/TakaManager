@@ -109,14 +109,15 @@ async function fetchCampaigns(creds: AdAccountCreds): Promise<Campaign[]> {
 
 export async function fetchTwitterInsights(
   creds: AdAccountCreds,
-  since: Date
+  since: Date,
+  until: Date = new Date()
 ): Promise<AdInsight[]> {
   const campaigns = await fetchCampaigns(creds);
   if (campaigns.length === 0) return [];
 
   const start = new Date(since);
   start.setHours(0, 0, 0, 0);
-  const end = new Date();
+  const end = new Date(until);
   end.setHours(0, 0, 0, 0);
   const dayCount = Math.max(
     1,
@@ -196,7 +197,8 @@ async function fetchLineItems(creds: AdAccountCreds): Promise<LineItem[]> {
 /** Deep fetch: line item (≈ad set) × day, carrying parent campaign id/name. */
 export async function fetchTwitterAdsets(
   creds: AdAccountCreds,
-  since: Date
+  since: Date,
+  until: Date = new Date()
 ): Promise<AdsetInsight[]> {
   const [campaigns, lineItems] = await Promise.all([
     fetchCampaigns(creds),
@@ -207,7 +209,7 @@ export async function fetchTwitterAdsets(
 
   const start = new Date(since);
   start.setHours(0, 0, 0, 0);
-  const end = new Date();
+  const end = new Date(until);
   end.setHours(0, 0, 0, 0);
   const dayCount = Math.max(
     1,

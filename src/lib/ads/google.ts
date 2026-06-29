@@ -81,7 +81,8 @@ interface GoogleResult {
 
 export async function fetchGoogleInsights(
   creds: AdAccountCreds,
-  since: Date
+  since: Date,
+  until: Date = new Date()
 ): Promise<AdInsight[]> {
   const token = await getAccessToken(creds);
   const cid = customerId(creds);
@@ -90,7 +91,7 @@ export async function fetchGoogleInsights(
            metrics.impressions, metrics.clicks, metrics.conversions,
            metrics.conversions_value
     FROM campaign
-    WHERE segments.date BETWEEN '${ymd(since)}' AND '${ymd(new Date())}'`;
+    WHERE segments.date BETWEEN '${ymd(since)}' AND '${ymd(until)}'`;
 
   const res = await fetch(
     `https://googleads.googleapis.com/${API_VERSION}/customers/${cid}/googleAds:searchStream`,
@@ -127,7 +128,8 @@ interface GoogleAdGroupResult extends GoogleResult {
 /** Deep fetch: ad group × day insights, carrying parent campaign id/name. */
 export async function fetchGoogleAdsets(
   creds: AdAccountCreds,
-  since: Date
+  since: Date,
+  until: Date = new Date()
 ): Promise<AdsetInsight[]> {
   const token = await getAccessToken(creds);
   const cid = customerId(creds);
@@ -137,7 +139,7 @@ export async function fetchGoogleAdsets(
            metrics.impressions, metrics.clicks, metrics.conversions,
            metrics.conversions_value
     FROM ad_group
-    WHERE segments.date BETWEEN '${ymd(since)}' AND '${ymd(new Date())}'`;
+    WHERE segments.date BETWEEN '${ymd(since)}' AND '${ymd(until)}'`;
 
   const res = await fetch(
     `https://googleads.googleapis.com/${API_VERSION}/customers/${cid}/googleAds:searchStream`,
