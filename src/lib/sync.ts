@@ -203,6 +203,10 @@ export async function ingestOrders(
 export interface SyncPageOpts extends SyncOpts {
   cursor?: string | null;
   useJourney?: boolean; // pass back what the server returned
+  until?: Date; // optional window end — for resumable date-chunked sync
+  // When false, don't stamp lastSyncedAt / run image backfill on the chunk's
+  // last page (used for all chunks except the newest one).
+  finalize?: boolean;
 }
 
 export interface SyncPageResult {
@@ -247,21 +251,25 @@ export async function syncStorePage(
   }
 
   const since = resolveSince(opts, store!.lastSyncedAt);
+  const until = opts.until;
   try {
     // On the first page (no cursor) also ask Shopify the total for an accurate bar.
-    const total = opts.cursor ? null : await fetchOrdersCount(creds, since);
+    const total = opts.cursor ? null : await fetchOrdersCount(creds, since, until);
 
     const page = await fetchOrdersPage(
       creds,
       since,
       opts.cursor ?? null,
-      opts.useJourney ?? true
+      opts.useJourney ?? true,
+      until
     );
     const productMap = await upsertProductsFromOrders(page.orders, storeId, organizationId);
     await upsertOrders(page.orders, storeId, organizationId, productMap);
 
-    // On the last page, mark synced and backfill any missing product images.
-    if (!page.hasNext) {
+    // On the last page, mark synced and backfill missing images — but only when
+    // finalizing (the newest chunk), so a long chunked backfill doesn't repeat
+    // the image backfill for every chunk.
+    if (!page.hasNext && opts.finalize !== false) {
       await prisma.store.update({
         where: { id: storeId },
         data: { lastSyncedAt: new Date() },

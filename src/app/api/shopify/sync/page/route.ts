@@ -19,8 +19,10 @@ export async function POST(req: NextRequest) {
   const result = await syncStorePage(String(b.storeId), session.oid, {
     sinceDays: b.sinceDays ? Number(b.sinceDays) : undefined,
     since: b.since ? new Date(String(b.since)) : undefined,
+    until: b.until ? new Date(String(b.until)) : undefined,
     cursor: b.cursor ? String(b.cursor) : null,
     useJourney: b.useJourney === undefined ? true : Boolean(b.useJourney),
+    finalize: b.finalize === undefined ? true : Boolean(b.finalize),
   });
 
   return NextResponse.json(result);

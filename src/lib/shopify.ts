@@ -398,13 +398,21 @@ export async function fetchProductImages(
 
 /** Total number of orders in the window — best-effort, for an accurate progress
  *  bar. Returns null if the API/version doesn't support ordersCount. */
+/** Shopify search query for an order window. `until` (optional) bounds the end
+ *  so a date-chunk pulls only its slice — needed for resumable chunked sync. */
+function orderRangeQuery(since: Date, until?: Date): string {
+  const upper = until ? ` created_at:<=${until.toISOString()}` : "";
+  return `created_at:>=${since.toISOString()}${upper} status:any`;
+}
+
 export async function fetchOrdersCount(
   creds: ShopifyCreds,
-  since: Date
+  since: Date,
+  until?: Date
 ): Promise<number | null> {
   try {
     const c = await resolveCreds(creds);
-    const queryStr = `created_at:>=${since.toISOString()} status:any`;
+    const queryStr = orderRangeQuery(since, until);
     const data = await shopifyGraphQL<{ ordersCount: { count: number } }>(
       c,
       `query OrdersCount($query: String) { ordersCount(query: $query) { count } }`,
@@ -422,10 +430,11 @@ export async function fetchOrdersPage(
   creds: ShopifyCreds,
   since: Date,
   cursor: string | null = null,
-  useJourney = true
+  useJourney = true,
+  until?: Date
 ): Promise<OrdersPage> {
   const c = await resolveCreds(creds);
-  const queryStr = `created_at:>=${since.toISOString()} status:any`;
+  const queryStr = orderRangeQuery(since, until);
   let used = useJourney;
 
   let data: OrdersResp;

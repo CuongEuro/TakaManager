@@ -60,6 +60,93 @@ function sleep(ms: number): Promise<void> {
 
 class FatalSyncError extends Error {} // never retried (e.g. deploy not ready)
 
+/** True if the error looks like a lost/suspended network connection (laptop
+ *  sleep, wifi drop, DNS fail) rather than a server-side error. */
+function isOfflineError(msg: string): boolean {
+  return (
+    !navigator.onLine ||
+    /failed to fetch|networkerror|load failed|err_internet|err_network|err_name_not_resolved|err_connection/i.test(
+      msg
+    )
+  );
+}
+
+/** Resolve once the browser is back online (or after maxMs as a fallback). Used
+ *  to PAUSE — not fail — a sync when the connection drops mid-way. */
+function waitForOnline(maxMs = 600000): Promise<void> {
+  if (navigator.onLine) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      clearInterval(poll);
+      window.removeEventListener("online", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, maxMs);
+    const poll = setInterval(() => navigator.onLine && finish(), 2000);
+    window.addEventListener("online", finish);
+  });
+}
+
+// --- resume: remember fully-synced calendar months per store (localStorage) ---
+const SYNCED_KEY = "taka:shopify-synced-months";
+function loadSynced(): Record<string, true> {
+  try {
+    return JSON.parse(localStorage.getItem(SYNCED_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+function isMonthSynced(storeId: string, monthKey: string): boolean {
+  return !!loadSynced()[`${storeId}|${monthKey}`];
+}
+function markMonthSynced(storeId: string, monthKey: string) {
+  const all = loadSynced();
+  all[`${storeId}|${monthKey}`] = true;
+  try {
+    localStorage.setItem(SYNCED_KEY, JSON.stringify(all));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+interface MonthChunk {
+  key: string; // YYYY-MM
+  since: Date;
+  until: Date;
+  fullMonth: boolean; // window fully covers this calendar month
+}
+
+/** Split [from,to] into calendar-month chunks (oldest→newest). Month keys are
+ *  stable across presets, so a month synced once can be skipped on re-run. */
+function buildMonthChunks(from: Date, to: Date): MonthChunk[] {
+  const chunks: MonthChunk[] = [];
+  let y = from.getFullYear();
+  let m = from.getMonth();
+  const endY = to.getFullYear();
+  const endM = to.getMonth();
+  while (y < endY || (y === endY && m <= endM)) {
+    const monthStart = new Date(y, m, 1, 0, 0, 0, 0);
+    const monthEnd = new Date(y, m + 1, 0, 23, 59, 59, 999);
+    chunks.push({
+      key: `${y}-${String(m + 1).padStart(2, "0")}`,
+      since: monthStart < from ? from : monthStart,
+      until: monthEnd > to ? to : monthEnd,
+      fullMonth: from <= monthStart && to >= monthEnd,
+    });
+    if (++m > 11) {
+      m = 0;
+      y++;
+    }
+  }
+  return chunks;
+}
+
+function currentMonthKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 /** Fetch ONE page. Throws on any non-OK result so the caller can retry. */
 async function fetchSyncPage(body: Record<string, unknown>): Promise<PageResp> {
   const res = await fetch("/api/shopify/sync/page", {
@@ -82,73 +169,73 @@ async function fetchSyncPage(body: Record<string, unknown>): Promise<PageResp> {
   return r;
 }
 
-/** Fetch a page with auto-retry. Re-requesting the SAME cursor is idempotent
- *  (server upserts by order id), so transient Shopify errors (502 / throttle /
- *  network blips) recover instead of aborting the whole sync. */
+/** Fetch a page resiliently. Re-requesting the SAME cursor is idempotent (server
+ *  upserts by order id). On a lost connection we WAIT for it to return (no
+ *  attempt burned) so laptop-sleep / wifi-drop resumes; transient server errors
+ *  retry with backoff. */
 async function fetchSyncPageRetry(
   body: Record<string, unknown>,
-  onRetry: (attempt: number, err: string) => void,
+  onNote: (label: string) => void,
   attempts = 5
 ): Promise<PageResp> {
-  let lastErr: unknown;
-  for (let i = 1; i <= attempts; i++) {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
     try {
       return await fetchSyncPage(body);
     } catch (e) {
-      if (e instanceof FatalSyncError) throw e; // don't retry
-      lastErr = e;
-      if (i < attempts) {
-        onRetry(i, e instanceof Error ? e.message : String(e));
-        await sleep(1000 * i); // linear backoff: 1s, 2s, 3s, 4s
+      if (e instanceof FatalSyncError) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (isOfflineError(msg)) {
+        onNote("mất kết nối mạng — đang chờ mạng trở lại để tiếp tục…");
+        await waitForOnline();
+        continue; // back online: retry the same page, no attempt consumed
       }
+      attempt++;
+      if (attempt >= attempts) throw e;
+      onNote(`lỗi tạm thời, đang thử lại lần ${attempt}… (${msg})`);
+      await sleep(1000 * attempt);
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-/** Sync ONE store by looping the per-page endpoint until done. Each request is
- *  small (so it can never hit the serverless time limit) and auto-retries on
- *  transient failure. `prefix` labels the progress message. */
-async function syncStorePaged(
+/** Sync ONE chunk (a bounded [since,until] window) page-by-page. */
+async function syncChunk(
   storeId: string,
-  sincePayload: Record<string, unknown>,
+  since: Date,
+  until: Date,
+  finalize: boolean,
   prefix: string,
   basePercent: number,
   span: number,
   onProgress: (p: ProgressState) => void
 ): Promise<SyncTotals> {
   let cursor: string | null = null;
-  let since: string | undefined;
   let useJourney = true;
   let products = 0;
   let orders = 0;
-  let page = 0;
   let total: number | null = null;
   let lastPct = basePercent;
-  // hard cap pages to avoid an infinite loop on a misbehaving cursor
-  for (page = 1; page <= 8000; page++) {
+  let sinceIso = "";
+  const sinceStr = since.toISOString();
+  const untilStr = until.toISOString();
+  for (let page = 1; page <= 8000; page++) {
     const body: Record<string, unknown> = cursor
-      ? { storeId, since, cursor, useJourney }
-      : { storeId, ...sincePayload };
-    const r = await fetchSyncPageRetry(body, (attempt, err) =>
-      onProgress({
-        percent: lastPct,
-        message: `${prefix}lỗi tạm thời, đang thử lại lần ${attempt}… (${err})`,
-      })
+      ? { storeId, since: sinceStr, until: untilStr, cursor, useJourney, finalize }
+      : { storeId, since: sinceStr, until: untilStr, finalize };
+    const r = await fetchSyncPageRetry(body, (label) =>
+      onProgress({ percent: lastPct, message: `${prefix}${label}` })
     );
 
     products += r.pageProducts;
     orders += r.pageOrders;
-    since = r.since;
+    sinceIso = r.since;
     useJourney = r.useJourney;
     cursor = r.cursor;
     if (r.total != null) total = r.total;
 
-    // Accurate fraction when we know the total; otherwise an asymptotic estimate.
     const fraction =
-      total && total > 0
-        ? Math.min(0.99, orders / total)
-        : pagePct(page) / 100;
+      total && total > 0 ? Math.min(0.99, orders / total) : pagePct(page) / 100;
     lastPct = basePercent + Math.round(span * fraction);
     const totalNote = total && total > 0 ? `/${total}` : "";
     onProgress({
@@ -158,7 +245,61 @@ async function syncStorePaged(
 
     if (!r.hasNext) break;
   }
-  return { ok: true, products, orders, since: since ?? "", useJourney };
+  return { ok: true, products, orders, since: sinceIso, useJourney };
+}
+
+/** Sync ONE store across [from,to] by calendar-month chunks. Skips months
+ *  already fully synced (unless `force`); always re-syncs the current month
+ *  (fresh data). Persists each fully-covered past month so re-runs resume. */
+async function syncStoreOverRange(
+  storeId: string,
+  from: Date,
+  to: Date,
+  force: boolean,
+  prefix: string,
+  basePercent: number,
+  span: number,
+  onProgress: (p: ProgressState) => void
+): Promise<SyncTotals & { skipped: number }> {
+  const chunks = buildMonthChunks(from, to);
+  const curKey = currentMonthKey();
+  const n = chunks.length;
+  let products = 0;
+  let orders = 0;
+  let useJourney = true;
+  let since = "";
+  let skipped = 0;
+  for (let i = 0; i < n; i++) {
+    const c = chunks[i];
+    const isCurrent = c.key === curKey;
+    const cBase = basePercent + Math.round((span * i) / n);
+    const cSpan = Math.max(1, Math.round(span / n));
+    if (!force && !isCurrent && isMonthSynced(storeId, c.key)) {
+      skipped++;
+      onProgress({
+        percent: cBase + cSpan,
+        message: `${prefix}bỏ qua ${c.key} (đã đồng bộ trước đó)…`,
+      });
+      continue;
+    }
+    const t = await syncChunk(
+      storeId,
+      c.since,
+      c.until,
+      i === n - 1, // finalize (stamp + image backfill) on the newest chunk only
+      `${prefix}${c.key} · `,
+      cBase,
+      cSpan,
+      onProgress
+    );
+    products += t.products;
+    orders += t.orders;
+    useJourney = t.useJourney;
+    if (!since) since = t.since;
+    // Remember only fully-covered, non-current months (safe to skip next time).
+    if (c.fullMonth && !isCurrent) markMonthSynced(storeId, c.key);
+  }
+  return { ok: true, products, orders, since, useJourney, skipped };
 }
 
 interface Store {
@@ -194,13 +335,18 @@ export default function StoresPage() {
   // Khoảng ngày kéo dữ liệu (đến hôm nay): preset số ngày hoặc "custom".
   const [rangeMode, setRangeMode] = useState("7");
   const [customDate, setCustomDate] = useState("");
+  // Bỏ qua các tháng đã đồng bộ trước đó (resume). Tắt = kéo lại từ đầu.
+  const [skipSynced, setSkipSynced] = useState(true);
 
-  function sincePayload(): Record<string, unknown> {
-    if (rangeMode === "custom")
-      return customDate
-        ? { since: new Date(customDate + "T00:00:00").toISOString() }
-        : { sinceDays: 7 };
-    return { sinceDays: Number(rangeMode) };
+  function resolveRange(): { from: Date; to: Date } {
+    const to = new Date();
+    if (rangeMode === "custom") {
+      const from = customDate
+        ? new Date(customDate + "T00:00:00")
+        : new Date(Date.now() - 7 * 86400000);
+      return { from, to };
+    }
+    return { from: new Date(Date.now() - Number(rangeMode) * 86400000), to };
   }
 
   function rangeLabel(): string {
@@ -274,17 +420,17 @@ export default function StoresPage() {
     setMsg(null);
     setProgress({ percent: 2, message: "Bắt đầu…" });
     try {
-      const t = await syncStorePaged(id, sincePayload(), "", 2, 96, (p) =>
+      const { from, to } = resolveRange();
+      const t = await syncStoreOverRange(id, from, to, !skipSynced, "", 2, 96, (p) =>
         setProgress(p)
       );
       setProgress({ percent: 100, message: "Hoàn tất" });
       const attrNote = t.useJourney ? "" : " (chưa bật phân loại kênh)";
+      const skipNote = t.skipped ? ` · bỏ qua ${t.skipped} tháng đã đồng bộ` : "";
       setMsg({
         id,
         ok: true,
-        text: `✓ Đã kéo ${t.products} sản phẩm & ${t.orders} đơn (${rangeLabel()}, từ ${fmtDate(
-          t.since
-        )} → hôm nay)${attrNote}. Số liệu đã lên Dashboard.`,
+        text: `✓ Đã kéo ${t.products} sản phẩm & ${t.orders} đơn (${rangeLabel()})${skipNote}${attrNote}. Số liệu đã lên Dashboard.`,
       });
       await load();
     } catch (e) {
@@ -308,15 +454,18 @@ export default function StoresPage() {
       let okCount = 0;
       let totProducts = 0;
       let totOrders = 0;
+      const { from, to } = resolveRange();
       const n = eligible.length;
       for (let i = 0; i < n; i++) {
         const s = eligible[i];
         const base = Math.round((i * 100) / n);
         const span = Math.round(100 / n);
         try {
-          const t = await syncStorePaged(
+          const t = await syncStoreOverRange(
             s.id,
-            sincePayload(),
+            from,
+            to,
+            !skipSynced,
             `[${i + 1}/${n}] ${s.name}: `,
             base,
             span,
@@ -425,6 +574,19 @@ export default function StoresPage() {
                 </Field>
               </div>
             )}
+            <label
+              className="flex items-center gap-1.5 pb-2 text-xs text-slate-600"
+              title="Bỏ qua các tháng đã đồng bộ trước đó để chạy nhanh; tắt = kéo lại toàn bộ"
+            >
+              <input
+                type="checkbox"
+                checked={skipSynced}
+                onChange={(e) => setSkipSynced(e.target.checked)}
+                disabled={!!busy}
+                className="h-3.5 w-3.5 rounded border-slate-300"
+              />
+              Bỏ qua tháng đã đồng bộ
+            </label>
             <Link
               href="/"
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
