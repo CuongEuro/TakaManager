@@ -128,6 +128,25 @@ export function resolveRange(
   return { start, end, days };
 }
 
+/**
+ * Build a [start, end) range from two calendar dates (YYYY-MM-DD), with both day
+ * boundaries taken in `timeZone`. `end` is exclusive = start of the day AFTER
+ * `toYMD`, so the whole `toYMD` day is included. Used by the custom date picker.
+ */
+export function customRange(
+  fromYMD: string,
+  toYMD: string,
+  timeZone: string = DEFAULT_TZ
+): DateRange {
+  const [fy, fm, fd] = fromYMD.split("-").map(Number);
+  const [ty, tm, td] = toYMD.split("-").map(Number);
+  let start = zonedMidnight(fy, fm, fd, timeZone);
+  let end = zonedMidnight(ty, tm, td + 1, timeZone); // d+1 overflows safely
+  if (end.getTime() < start.getTime()) [start, end] = [end, start]; // guard swap
+  const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000));
+  return { start, end, days };
+}
+
 /** ISO date (YYYY-MM-DD) for an instant, in the given timezone. */
 export function isoDay(d: Date, timeZone: string = DEFAULT_TZ): string {
   const { y, m, d: day } = partsInTz(d, timeZone);

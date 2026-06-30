@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { resolveRange, RangePreset, DEFAULT_TZ } from "@/lib/dates";
+import { resolveRange, customRange, RangePreset, DEFAULT_TZ } from "@/lib/dates";
 import { computeDashboard } from "@/lib/pnl";
 import { getSession } from "@/lib/auth";
 
@@ -12,6 +12,9 @@ export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams;
   const preset = (sp.get("preset") ?? "today") as RangePreset;
+  const from = sp.get("from"); // YYYY-MM-DD (custom range)
+  const to = sp.get("to");
+  const isYMD = (v: string | null): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const storeId = sp.get("storeId") || undefined;
 
   // Day boundaries follow the store's timezone (default Japan). For "all stores"
@@ -25,7 +28,11 @@ export async function GET(req: NextRequest) {
   });
   const timezone = tzStore?.timezone || DEFAULT_TZ;
 
-  const range = resolveRange(preset, timezone);
+  // Custom from/to (calendar dates in the store tz) wins; else a named preset.
+  const range =
+    isYMD(from) && isYMD(to)
+      ? customRange(from, to, timezone)
+      : resolveRange(preset, timezone);
   const [data, storeOptions] = await Promise.all([
     computeDashboard({
       organizationId: session.oid,

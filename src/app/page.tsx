@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { DashboardData } from "@/lib/pnl";
-import { RANGE_PRESET_LABELS, RangePreset } from "@/lib/dates";
+import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
 import {
   COST_RULE_TYPE_LABELS,
   FIXED_COST_CATEGORY_LABELS,
@@ -19,37 +19,39 @@ import { Card, StatCard, PageHeader, Select, EmptyState, Badge } from "@/compone
 import { DashboardChart } from "@/components/DashboardChart";
 
 interface DashboardResponse extends DashboardData {
-  preset: RangePreset;
   storeId: string | null;
   storeOptions: { id: string; name: string }[];
   timezone: string;
 }
 
-const PRESETS: RangePreset[] = [
-  "today",
-  "yesterday",
-  "last7",
-  "thisWeek",
-  "thisMonth",
-  "lastMonth",
-  "last30",
-];
+// Calendar date (YYYY-MM-DD) in local tz — matches what the picker shows.
+const dayStr = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
 
 export default function DashboardPage() {
-  const [preset, setPreset] = useState<RangePreset>("today");
+  // Default to "today" (single-day range) on open.
+  const [range, setRange] = useState<DateRange>(() => ({
+    from: new Date(),
+    to: new Date(),
+  }));
   const [storeId, setStoreId] = useState<string>("");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    const params = new URLSearchParams({ preset });
+    const params = new URLSearchParams({
+      from: dayStr(range.from),
+      to: dayStr(range.to),
+    });
     if (storeId) params.set("storeId", storeId);
     fetch(`/api/dashboard?${params}`)
       .then((r) => r.json())
       .then((d) => setData(d))
       .finally(() => setLoading(false));
-  }, [preset, storeId]);
+  }, [range, storeId]);
 
   const s = data?.summary;
   const netTone = s && s.profit.netProfit >= 0 ? "good" : "bad";
@@ -64,21 +66,7 @@ export default function DashboardPage() {
         }.`}
         actions={
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-            <div className="flex flex-wrap rounded-lg border border-slate-200 bg-white p-1">
-              {PRESETS.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setPreset(p)}
-                  className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
-                    preset === p
-                      ? "bg-brand-600 text-white"
-                      : "text-slate-500 hover:bg-slate-100"
-                  }`}
-                >
-                  {RANGE_PRESET_LABELS[p]}
-                </button>
-              ))}
-            </div>
+            <DateRangePicker value={range} onChange={setRange} />
             <div className="w-full sm:w-44">
               <Select value={storeId} onChange={(e) => setStoreId(e.target.value)}>
                 <option value="">Tất cả store</option>
