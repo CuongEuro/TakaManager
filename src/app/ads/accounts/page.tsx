@@ -16,6 +16,7 @@ import {
   EmptyState,
 } from "@/components/ui";
 import { AD_PLATFORMS, AD_PLATFORM_LABELS } from "@/lib/constants";
+import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
 
 interface AdAccount {
   id: string;
@@ -126,22 +127,6 @@ function buildChunks(
   return chunks;
 }
 
-/** Resolve the {from,to} window from the picker (preset days or custom dates). */
-function resolveRange(
-  rangeDays: string,
-  customFrom: string,
-  customTo: string
-): { from: Date; to: Date } | null {
-  if (rangeDays === "custom") {
-    if (!customFrom || !customTo) return null;
-    const from = new Date(customFrom);
-    const to = new Date(customTo);
-    if (isNaN(from.getTime()) || isNaN(to.getTime()) || from > to) return null;
-    return { from, to };
-  }
-  const days = Number(rangeDays);
-  return { from: new Date(Date.now() - days * 86400000), to: new Date() };
-}
 
 const CRED_FIELDS: Record<string, { key: string; label: string }[]> = {
   FACEBOOK: [{ key: "accessToken", label: "Access Token" }],
@@ -181,12 +166,11 @@ export default function AdAccountsPage() {
   const [creds, setCreds] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
-  // Sync window. Presets are "days back"; "custom" uses the date inputs below.
-  const [rangeDays, setRangeDays] = useState("7");
-  const [customFrom, setCustomFrom] = useState(() =>
-    dayStr(new Date(Date.now() - 90 * 86400000))
-  );
-  const [customTo, setCustomTo] = useState(() => dayStr(new Date()));
+  // Sync window — chosen via the date-range picker (presets + calendar).
+  const [range, setRange] = useState<DateRange>(() => ({
+    from: new Date(Date.now() - 6 * 86400000),
+    to: new Date(),
+  }));
   // Bulk-sync progress + per-account results (browser-driven, one account at a time).
   const [syncProg, setSyncProg] = useState<{ done: number; total: number } | null>(null);
   const [syncResults, setSyncResults] = useState<SyncResult[]>([]);
@@ -406,11 +390,6 @@ export default function AdAccountsPage() {
   }
 
   async function syncOne(a: AdAccount) {
-    const range = resolveRange(rangeDays, customFrom, customTo);
-    if (!range) {
-      setMsg({ ok: false, text: "Chọn 'Từ ngày' và 'Đến ngày' hợp lệ." });
-      return;
-    }
     setBusy(a.id + "sync");
     setMsg(null);
     setSyncResults([]);
@@ -437,11 +416,6 @@ export default function AdAccountsPage() {
   async function syncAll() {
     // Browser-driven: each account synced chunk-by-chunk with auto-retry → live
     // progress, per-account results, no long single request that can time out.
-    const range = resolveRange(rangeDays, customFrom, customTo);
-    if (!range) {
-      setMsg({ ok: false, text: "Chọn 'Từ ngày' và 'Đến ngày' hợp lệ." });
-      return;
-    }
     const targets = items.filter((a) => a.configured && a.active);
     if (targets.length === 0) {
       setMsg({ ok: false, text: "Không có tài khoản đủ khoá để đồng bộ." });
@@ -481,50 +455,12 @@ export default function AdAccountsPage() {
         subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Tài khoản chạy cho 1 store → chọn Store khi thêm. Tài khoản dùng chung nhiều store (hay gặp ở Meta) → để 'Chung' rồi bấm 'Gán store' cho từng campaign."
         actions={
           <div className="flex flex-wrap items-end gap-2">
-            <div className="w-40">
-              <Field label="Kéo dữ liệu">
-                <Select
-                  value={rangeDays}
-                  onChange={(e) => setRangeDays(e.target.value)}
-                  disabled={!!busy}
-                >
-                  <option value="0">Hôm nay</option>
-                  <option value="1">Hôm qua → nay</option>
-                  <option value="7">7 ngày</option>
-                  <option value="30">30 ngày</option>
-                  <option value="60">60 ngày</option>
-                  <option value="90">90 ngày</option>
-                  <option value="365">1 năm</option>
-                  <option value="custom">Tuỳ chọn ngày…</option>
-                </Select>
-              </Field>
+            <div>
+              <span className="mb-1 block text-xs font-medium text-slate-500">
+                Kéo dữ liệu
+              </span>
+              <DateRangePicker value={range} onChange={setRange} disabled={!!busy} />
             </div>
-            {rangeDays === "custom" && (
-              <>
-                <div className="w-40">
-                  <Field label="Từ ngày">
-                    <Input
-                      type="date"
-                      value={customFrom}
-                      max={customTo}
-                      onChange={(e) => setCustomFrom(e.target.value)}
-                      disabled={!!busy}
-                    />
-                  </Field>
-                </div>
-                <div className="w-40">
-                  <Field label="Đến ngày">
-                    <Input
-                      type="date"
-                      value={customTo}
-                      max={dayStr(new Date())}
-                      onChange={(e) => setCustomTo(e.target.value)}
-                      disabled={!!busy}
-                    />
-                  </Field>
-                </div>
-              </>
-            )}
             <Button onClick={syncAll} disabled={!!busy}>
               {busy === "ALL" && syncProg
                 ? `Đang đồng bộ ${syncProg.done}/${syncProg.total}...`

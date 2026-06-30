@@ -8,7 +8,6 @@ import {
   Card,
   Button,
   Input,
-  Select,
   Field,
   Table,
   Th,
@@ -17,6 +16,7 @@ import {
   EmptyState,
 } from "@/components/ui";
 import { formatPercent } from "@/lib/format";
+import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
 
 interface SyncTotals {
   ok: boolean;
@@ -332,27 +332,18 @@ export default function StoresPage() {
     null
   );
   const [progress, setProgress] = useState<ProgressState | null>(null);
-  // Khoảng ngày kéo dữ liệu (đến hôm nay): preset số ngày hoặc "custom".
-  const [rangeMode, setRangeMode] = useState("7");
-  const [customDate, setCustomDate] = useState("");
+  // Khoảng ngày kéo dữ liệu — chọn qua bộ chọn ngày (preset + lịch).
+  const [range, setRange] = useState<DateRange>(() => ({
+    from: new Date(Date.now() - 6 * 86400000),
+    to: new Date(),
+  }));
   // Bỏ qua các tháng đã đồng bộ trước đó (resume). Tắt = kéo lại từ đầu.
   const [skipSynced, setSkipSynced] = useState(true);
 
-  function resolveRange(): { from: Date; to: Date } {
-    const to = new Date();
-    if (rangeMode === "custom") {
-      const from = customDate
-        ? new Date(customDate + "T00:00:00")
-        : new Date(Date.now() - 7 * 86400000);
-      return { from, to };
-    }
-    return { from: new Date(Date.now() - Number(rangeMode) * 86400000), to };
-  }
-
   function rangeLabel(): string {
-    if (rangeMode === "custom")
-      return customDate ? `từ ${fmtDate(customDate)} đến hôm nay` : "7 ngày qua";
-    return `${rangeMode} ngày qua`;
+    return `từ ${fmtDate(range.from.toISOString())} đến ${fmtDate(
+      range.to.toISOString()
+    )}`;
   }
 
   async function add() {
@@ -420,7 +411,7 @@ export default function StoresPage() {
     setMsg(null);
     setProgress({ percent: 2, message: "Bắt đầu…" });
     try {
-      const { from, to } = resolveRange();
+      const { from, to } = range;
       const t = await syncStoreOverRange(id, from, to, !skipSynced, "", 2, 96, (p) =>
         setProgress(p)
       );
@@ -454,7 +445,7 @@ export default function StoresPage() {
       let okCount = 0;
       let totProducts = 0;
       let totOrders = 0;
-      const { from, to } = resolveRange();
+      const { from, to } = range;
       const n = eligible.length;
       for (let i = 0; i < n; i++) {
         const s = eligible[i];
@@ -543,37 +534,12 @@ export default function StoresPage() {
         subtitle="Kết nối Shopify → bấm Sync để kéo đơn/sản phẩm về; số liệu hiển thị ở Dashboard."
         actions={
           <div className="flex flex-wrap items-end gap-2">
-            <div className="w-40">
-              <Field label="Kéo dữ liệu từ">
-                <Select
-                  value={rangeMode}
-                  onChange={(e) => setRangeMode(e.target.value)}
-                  disabled={!!busy}
-                >
-                  <option value="1">1 ngày (hôm nay)</option>
-                  <option value="3">3 ngày qua</option>
-                  <option value="7">7 ngày qua</option>
-                  <option value="30">30 ngày qua</option>
-                  <option value="60">60 ngày qua</option>
-                  <option value="90">90 ngày qua</option>
-                  <option value="365">1 năm qua</option>
-                  <option value="custom">Từ ngày cụ thể…</option>
-                </Select>
-              </Field>
+            <div>
+              <span className="mb-1 block text-xs font-medium text-slate-500">
+                Kéo dữ liệu từ
+              </span>
+              <DateRangePicker value={range} onChange={setRange} disabled={!!busy} />
             </div>
-            {rangeMode === "custom" && (
-              <div className="w-40">
-                <Field label="Từ ngày">
-                  <Input
-                    type="date"
-                    value={customDate}
-                    max={new Date().toISOString().slice(0, 10)}
-                    onChange={(e) => setCustomDate(e.target.value)}
-                    disabled={!!busy}
-                  />
-                </Field>
-              </div>
-            )}
             <label
               className="flex items-center gap-1.5 pb-2 text-xs text-slate-600"
               title="Bỏ qua các tháng đã đồng bộ trước đó để chạy nhanh; tắt = kéo lại toàn bộ"
