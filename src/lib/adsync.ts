@@ -222,6 +222,7 @@ export async function syncAdAccount(
     sinceDays?: number;
     since?: string | Date; // explicit window start (chunked / custom range)
     until?: string | Date; // explicit window end (defaults to today)
+    deep?: boolean; // also pull ad set-level detail (heavy). Default true.
   } = {}
 ): Promise<AdSyncResult> {
   const a = await prisma.adAccount.findUnique({ where: { id: accountId } });
@@ -245,21 +246,26 @@ export async function syncAdAccount(
 
   try {
     const creds = toCreds(a);
-    const insights = await fetchInsights(creds, since, until);
+    // Campaign-level spend (light) — always pulled; retried on transient errors.
+    const insights = await withRetry(() => fetchInsights(creds, since, until));
 
-    // Deep hierarchy FIRST so campaign entities exist (they are the mapping
-    // target). syncHierarchy's update only touches name → a user's campaign→store
-    // mapping (AdEntity.storeId) is preserved across re-syncs.
-    const adsetRows = await fetchAdsets(creds, since, until);
-    const adsets = await syncHierarchy(
-      {
-        id: a.id,
-        organizationId: a.organizationId,
-        storeId: a.storeId,
-        platform: a.platform,
-      },
-      adsetRows
-    );
+    // Deep ad set-level detail is HEAVY (a common source of Meta "Service
+    // temporarily unavailable" on long windows). Pull it only when requested
+    // (the newest chunk); older backfill chunks skip it. Campaign entities still
+    // get upserted from `insights` below, so attribution keeps working.
+    let adsets = 0;
+    if (opts.deep !== false) {
+      const adsetRows = await withRetry(() => fetchAdsets(creds, since, until));
+      adsets = await syncHierarchy(
+        {
+          id: a.id,
+          organizationId: a.organizationId,
+          storeId: a.storeId,
+          platform: a.platform,
+        },
+        adsetRows
+      );
+    }
 
     // Ensure a CAMPAIGN entity exists for every campaign that has spend (even if
     // the deep adset fetch returned nothing for it) so attribution can map it.
@@ -432,6 +438,26 @@ export async function syncAllAdAccounts(
 
 function daysAgo(n: number): Date {
   return new Date(Date.now() - n * 86400000);
+}
+
+// Transient platform errors worth an in-place retry (Meta "Service temporarily
+// unavailable" / code 1-2, rate limits, 5xx, throttling). Permanent errors
+// (bad token, permission) don't match → fail fast.
+const TRANSIENT = /temporarily unavailable|service unavailable|unexpected error|please (reduce|retry)|reduce the amount|HTTP (429|5\d\d)|throttl|rate limit|timeout|ETIMEDOUT|ECONNRESET/i;
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      if (i >= attempts || !TRANSIENT.test(m)) throw e;
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1500 * i)); // backoff: 1.5s,3s,4.5s
+    }
+  }
+  throw lastErr;
 }
 
 // Parse a window bound. A date-only "YYYY-MM-DD" is read as LOCAL midnight (not

@@ -15,12 +15,14 @@ export async function POST(req: NextRequest) {
   // Explicit window (chunked / custom range). ISO date strings.
   const since = b.since ? String(b.since) : undefined;
   const until = b.until ? String(b.until) : undefined;
+  const deep = b.deep === undefined ? undefined : Boolean(b.deep);
   try {
     if (b.accountId) {
       const result = await syncAdAccount(String(b.accountId), session.oid, {
         sinceDays,
         since,
         until,
+        deep,
       });
       return NextResponse.json({ results: [result] });
     }

@@ -62,6 +62,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Looks like a lost/suspended connection (laptop sleep, wifi drop, DNS fail). */
+function isOfflineError(msg: string): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    (!navigator.onLine ||
+      /failed to fetch|networkerror|load failed|err_internet|err_network|err_name_not_resolved|err_connection/i.test(
+        msg
+      ))
+  );
+}
+
+/** Resolve once the browser is back online (or after maxMs). Pauses — not fails
+ *  — a sync when the connection drops mid-way. */
+function waitForOnline(maxMs = 600000): Promise<void> {
+  if (typeof navigator === "undefined" || navigator.onLine)
+    return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      clearInterval(poll);
+      window.removeEventListener("online", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, maxMs);
+    const poll = setInterval(() => navigator.onLine && finish(), 2000);
+    window.addEventListener("online", finish);
+  });
+}
+
 function startOfDay(d: Date): Date {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
@@ -76,11 +105,12 @@ const dayStr = (d: Date) =>
   ).padStart(2, "0")}`;
 
 /** Split [from, to] into ≤maxDays day-aligned chunks (oldest → newest). Long
- * windows are synced chunk-by-chunk so no single request times out. */
+ * windows are synced chunk-by-chunk so no single request times out. 14 days
+ * keeps each Meta request light (avoids "Service temporarily unavailable"). */
 function buildChunks(
   from: Date,
   to: Date,
-  maxDays = 30
+  maxDays = 14
 ): { since: Date; until: Date }[] {
   const chunks: { since: Date; until: Date }[] = [];
   let s = startOfDay(from);
@@ -297,14 +327,18 @@ export default function AdAccountsPage() {
   }
 
   // Sync ONE chunk (a sub-window) with auto-retry. Throws if it keeps failing.
+  // Sync ONE chunk with resilience. On a lost connection we WAIT for it to come
+  // back (no attempt burned). Transient server errors retry with backoff.
   async function syncChunkRetry(
     accountId: string,
     since: Date,
     until: Date,
-    attempts = 3
+    deep: boolean,
+    attempts = 5
   ): Promise<SyncResult> {
-    let lastErr: unknown;
-    for (let i = 1; i <= attempts; i++) {
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
       try {
         const r = await fetch("/api/ads/sync", {
           method: "POST",
@@ -313,22 +347,29 @@ export default function AdAccountsPage() {
             accountId,
             since: dayStr(since), // calendar dates → server buckets by day
             until: dayStr(until),
+            deep, // ad set-level detail only for the newest chunk (heavy)
           }),
         }).then((x) => x.json());
         const res: SyncResult | undefined = r.results?.[0];
         if (!res || !res.ok) throw new Error(res?.error ?? r.error ?? "Đồng bộ lỗi");
         return res;
       } catch (e) {
-        lastErr = e;
-        if (i < attempts) await sleep(700 * i); // backoff before auto-retry
+        const msg = e instanceof Error ? e.message : String(e);
+        if (isOfflineError(msg)) {
+          await waitForOnline(); // pause until network returns, then retry
+          continue;
+        }
+        attempt++;
+        if (attempt >= attempts) throw e;
+        await sleep(1000 * attempt); // backoff before auto-retry
       }
     }
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }
 
   // Sync one account over [from,to] by chunking. Failed chunks auto-retry; if a
   // chunk still fails it is reported but other chunks proceed (no data loss for
-  // the parts that succeeded — each chunk is idempotent server-side).
+  // the parts that succeeded — each chunk is idempotent server-side). Only the
+  // newest chunk pulls the heavy ad set-level detail.
   async function syncAccountRange(
     a: AdAccount,
     from: Date,
@@ -338,9 +379,11 @@ export default function AdAccountsPage() {
     let rows = 0;
     let ok = true;
     let error: string | undefined;
-    for (const c of buildChunks(from, to)) {
+    const chunks = buildChunks(from, to);
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i];
       try {
-        const res = await syncChunkRetry(a.id, c.since, c.until);
+        const res = await syncChunkRetry(a.id, c.since, c.until, i === chunks.length - 1);
         rows += res.rows;
       } catch (e) {
         ok = false;
