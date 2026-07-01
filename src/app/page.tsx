@@ -203,6 +203,9 @@ export default function DashboardPage() {
               <div className="space-y-1 text-sm">
                 <PnlRow label="Doanh thu (ex-tax)" value={s.revenue.revenue} strong />
                 <PnlSub label="— trong đó phí ship thu" value={s.revenue.shippingCharged} />
+                {s.revenue.refunded > 0 && (
+                  <PnlSub label="— đã hoàn hàng (return)" value={-s.revenue.refunded} />
+                )}
                 <PnlSub label="— thuế thu hộ (nộp nhà nước)" value={s.revenue.tax} />
                 <PnlSub label="— tổng khách đã trả (gồm thuế)" value={s.revenue.totalCollected} />
                 <Divider />

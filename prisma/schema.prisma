@@ -308,6 +308,7 @@ model Order {
   discounts       Float    @default(0)
   tax             Float    @default(0)
   shippingCharged Float    @default(0) // shipping paid by customer
+  refunded        Float    @default(0) // total refunded to customer (incl tax)
   itemsCount      Int      @default(0)
   source          String   @default("MANUAL") // MANUAL | API
   // --- attribution (for ad optimization) ---

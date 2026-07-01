@@ -34,6 +34,7 @@ export interface ShopifyOrderNorm {
   discounts: number;
   tax: number;
   shippingCharged: number;
+  refunded: number; // total refunded to customer (incl tax)
   itemsCount: number;
   // attribution
   channel: string; // FACEBOOK | GOOGLE | TWITTER | KLAVIYO | DIRECT | ORGANIC | REFERRAL | OTHER
@@ -198,7 +199,9 @@ query Orders($cursor: String, $query: String) {
       sourceName
       totalDiscountsSet { shopMoney { amount } }
       totalTaxSet { shopMoney { amount } }
+      currentTotalTaxSet { shopMoney { amount } }
       totalShippingPriceSet { shopMoney { amount } }
+      totalRefundedSet { shopMoney { amount } }
       customerJourneySummary {
         lastVisit {
           source
@@ -232,7 +235,9 @@ query Orders($cursor: String, $query: String) {
       sourceName
       totalDiscountsSet { shopMoney { amount } }
       totalTaxSet { shopMoney { amount } }
+      currentTotalTaxSet { shopMoney { amount } }
       totalShippingPriceSet { shopMoney { amount } }
+      totalRefundedSet { shopMoney { amount } }
       lineItems(first: 50) {
         nodes {
           title
@@ -265,7 +270,9 @@ interface OrdersResp {
       sourceName: string | null;
       totalDiscountsSet: { shopMoney: { amount: string } } | null;
       totalTaxSet: { shopMoney: { amount: string } } | null;
+      currentTotalTaxSet: { shopMoney: { amount: string } } | null;
       totalShippingPriceSet: { shopMoney: { amount: string } } | null;
+      totalRefundedSet: { shopMoney: { amount: string } } | null;
       customerJourneySummary: { lastVisit: Visit | null } | null;
       lineItems: {
         nodes: {
@@ -349,8 +356,10 @@ export function normalizeOrder(
     date: new Date(o.createdAt),
     grossRevenue: gross,
     discounts: num(o.totalDiscountsSet?.shopMoney.amount),
-    tax: num(o.totalTaxSet?.shopMoney.amount),
+    // current* is net of refunds/edits → matches Shopify's Taxes report.
+    tax: num(o.currentTotalTaxSet?.shopMoney.amount ?? o.totalTaxSet?.shopMoney.amount),
     shippingCharged: num(o.totalShippingPriceSet?.shopMoney.amount),
+    refunded: num(o.totalRefundedSet?.shopMoney.amount),
     itemsCount: units,
     channel: attr.channel,
     utmSource: attr.utmSource,
@@ -515,11 +524,13 @@ interface WebhookOrderPayload {
   created_at: string;
   total_discounts?: string;
   total_tax?: string;
+  current_total_tax?: string; // net of refunds/edits
   total_shipping_price_set?: { shop_money?: { amount?: string } } | null;
   shipping_lines?: { price?: string }[];
   source_name?: string | null;
   landing_site?: string | null;
   referring_site?: string | null;
+  refunds?: { transactions?: { amount?: string; kind?: string }[] }[];
   line_items?: {
     title: string;
     quantity: number;
@@ -572,13 +583,25 @@ export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm 
     num(p.total_shipping_price_set?.shop_money?.amount) ||
     (p.shipping_lines ?? []).reduce((s, l) => s + num(l.price), 0);
 
+  // Sum refund transactions (best-effort; a later GraphQL sync sets the exact
+  // totalRefundedSet). Only "refund" kind, ignore authorizations/voids.
+  const refunded = (p.refunds ?? []).reduce(
+    (s, r) =>
+      s +
+      (r.transactions ?? [])
+        .filter((t) => t.kind === "refund")
+        .reduce((a, t) => a + num(t.amount), 0),
+    0
+  );
+
   return {
     externalId: `gid://shopify/Order/${p.id}`,
     date: new Date(p.created_at),
     grossRevenue: gross,
     discounts: num(p.total_discounts),
-    tax: num(p.total_tax),
+    tax: num(p.current_total_tax ?? p.total_tax),
     shippingCharged: shipping,
+    refunded,
     itemsCount: units,
     channel: attr.channel,
     utmSource: attr.utmSource,

@@ -19,8 +19,9 @@ export interface RevenueBlock {
   netSales: number; // grossSales - discounts (pre-tax revenue)
   tax: number; // pass-through, excluded from profit
   shippingCharged: number; // shipping paid by customers
+  refunded: number; // total refunded to customers (incl tax), already netted out
   revenue: number; // netSales + shippingCharged (revenue base for profit, ex-tax)
-  totalCollected: number; // revenue + tax (what customers actually paid)
+  totalCollected: number; // revenue + tax (what customers actually paid, net of refunds)
 }
 
 export interface PnlResult {
@@ -122,6 +123,7 @@ type OrderWithItems = {
   discounts: number;
   tax: number;
   shippingCharged: number;
+  refunded: number; // total refunded to customer (incl tax)
   channel: string | null;
   // Prices on Shopify are tax-inclusive (JP 税込); back out tax per the store's
   // rate. null store → 0 (no back-out).
@@ -145,10 +147,10 @@ type Rule = {
   active: boolean;
 };
 
-/** Tax-inclusive amount the customer paid (product net + shipping), one order.
+/** Net amount the customer paid, one order = product net + shipping − refunds.
  *  Prices are 税込 so this already includes the consumption tax. */
 function orderCollected(o: OrderWithItems): number {
-  return o.grossRevenue - o.discounts + o.shippingCharged;
+  return o.grossRevenue - o.discounts + o.shippingCharged - o.refunded;
 }
 
 /** Consumption tax for one order. Prefer Shopify's actual tax (handles
@@ -276,6 +278,7 @@ export async function computeDashboard(
             grossRevenue: true,
             discounts: true,
             shippingCharged: true,
+            refunded: true,
             store: { select: { taxRate: true } },
           },
         })
@@ -404,6 +407,7 @@ function buildPnl(args: {
         grossRevenue: number;
         discounts: number;
         shippingCharged: number;
+        refunded: number;
         store: { taxRate: number } | null;
       }[]
     | null;
@@ -419,7 +423,8 @@ function buildPnl(args: {
   const grossSales = sum(orders, (o) => o.grossRevenue);
   const discounts = sum(orders, (o) => o.discounts);
   const shippingCharged = sum(orders, (o) => o.shippingCharged);
-  const totalCollected = sum(orders, orderCollected); // customer paid (incl tax)
+  const refunded = sum(orders, (o) => o.refunded); // returns (incl tax)
+  const totalCollected = sum(orders, orderCollected); // customer paid, net of refunds
   const tax = sum(orders, orderTax); // consumption tax to remit
   const revenue = totalCollected - tax; // ex-tax revenue base
   const netSales = revenue - shippingCharged; // ex-tax product revenue (approx)
@@ -455,7 +460,7 @@ function buildPnl(args: {
     const totalRev = args.allOrdersForShare.reduce(
       (s, o) =>
         s +
-        (o.grossRevenue - o.discounts + o.shippingCharged) /
+        (o.grossRevenue - o.discounts + o.shippingCharged - o.refunded) /
           (1 + (o.store?.taxRate ?? 0)),
       0
     );
@@ -503,6 +508,7 @@ function buildPnl(args: {
       netSales,
       tax,
       shippingCharged,
+      refunded,
       revenue,
       totalCollected,
     },

@@ -130,6 +130,7 @@ async function upsertOrders(
       discounts: o.discounts,
       tax: o.tax,
       shippingCharged: o.shippingCharged,
+      refunded: o.refunded,
       itemsCount: o.itemsCount,
       channel: o.channel,
       utmSource: o.utmSource,
