@@ -102,6 +102,10 @@ export default function DashboardPage() {
   const s = data?.summary;
   const netTone = s && s.profit.netProfit >= 0 ? "good" : "bad";
   const channelMax = Math.max(1, ...(data?.channels?.map((c) => c.revenue) ?? []));
+  // Effective % of the total the customer paid (base for % cost rules).
+  const collectedBase = s?.revenue.totalCollected ?? 0;
+  const pctOfCollected = (v: number) =>
+    collectedBase > 0 ? `${((v / collectedBase) * 100).toFixed(1)}%` : "—";
 
   return (
     <div>
@@ -215,12 +219,17 @@ export default function DashboardPage() {
                 {Object.entries(s.variableA.byType).map(([k, v]) => (
                   <PnlRow
                     key={k}
-                    label={COST_RULE_TYPE_LABELS[k] ?? k}
+                    label={`${COST_RULE_TYPE_LABELS[k] ?? k} (${pctOfCollected(v)})`}
                     value={-v}
                     negative
                   />
                 ))}
-                <PnlRow label="Tổng biến đổi A" value={-s.variableA.total} negative strong />
+                <PnlRow
+                  label={`Tổng biến đổi A (${pctOfCollected(s.variableA.total)})`}
+                  value={-s.variableA.total}
+                  negative
+                  strong
+                />
                 <Divider />
                 <PnlRow label="Lợi nhuận gộp" value={s.profit.grossProfit} strong />
                 <Divider />
@@ -230,11 +239,14 @@ export default function DashboardPage() {
                 {Object.entries(s.variableB.byPlatform).map(([k, v]) => (
                   <PnlRow
                     key={k}
-                    label={AD_PLATFORM_LABELS[k] ?? k}
+                    label={`${AD_PLATFORM_LABELS[k] ?? k} (${pctOfCollected(v)})`}
                     value={-v}
                     negative
                   />
                 ))}
+                <div className="px-2 text-xs italic text-slate-400">
+                  ↳ đã gồm thuế theo cài đặt thuế của từng tài khoản Ads
+                </div>
                 <PnlRow label="Contribution" value={s.profit.contribution} strong />
                 <Divider />
                 <div className="pt-1 text-xs font-semibold uppercase text-slate-400">

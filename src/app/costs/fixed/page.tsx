@@ -84,6 +84,21 @@ export default function FixedCostsPage() {
   });
   const [saving, setSaving] = useState(false);
 
+  // Bulk-set "effective from" for ALL costs (fixes legacy rows created mid-month).
+  const [bulkStart, setBulkStart] = useState(firstOfMonth());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  async function applyStartToAll() {
+    if (!bulkStart || items.length === 0) return;
+    if (!confirm(`Đặt "Áp dụng từ" = ${fmtDate(bulkStart)} cho TẤT CẢ ${items.length} khoản?`))
+      return;
+    setBulkBusy(true);
+    try {
+      for (const i of items) await update(i.id, { startDate: bulkStart });
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function add() {
     if (!form.name.trim() || !form.amount) return;
     await create({
@@ -138,9 +153,29 @@ export default function FixedCostsPage() {
         title="Chi phí cố định"
         subtitle="Shopify, Klaviyo, Line, cơ sở... Tự phân bổ theo ngày khi tính P&L."
         actions={
-          <Badge tone="blue">
-            Tổng ≈ {formatJPY(totalMonthly)} / tháng
-          </Badge>
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <span className="mb-1 block text-xs font-medium text-slate-500">
+                Áp dụng từ (đặt cho tất cả)
+              </span>
+              <div className="flex gap-2">
+                <Input
+                  type="date"
+                  value={bulkStart}
+                  onChange={(e) => setBulkStart(e.target.value)}
+                  className="w-40"
+                />
+                <Button
+                  variant="secondary"
+                  onClick={applyStartToAll}
+                  disabled={bulkBusy || items.length === 0}
+                >
+                  {bulkBusy ? "Đang áp dụng..." : "Áp dụng tất cả"}
+                </Button>
+              </div>
+            </div>
+            <Badge tone="blue">Tổng ≈ {formatJPY(totalMonthly)} / tháng</Badge>
+          </div>
         }
       />
 
