@@ -534,7 +534,7 @@ export default function StoresPage() {
         subtitle="Kết nối Shopify → bấm Sync để kéo đơn/sản phẩm về; số liệu hiển thị ở Dashboard."
         actions={
           <div className="flex flex-wrap items-end gap-2">
-            <div>
+            <div className="w-full sm:w-auto">
               <span className="mb-1 block text-xs font-medium text-slate-500">
                 Kéo dữ liệu từ
               </span>

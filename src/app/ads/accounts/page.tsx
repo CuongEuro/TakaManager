@@ -455,7 +455,7 @@ export default function AdAccountsPage() {
         subtitle="Kết nối để TỰ ĐỘNG kéo chi phí Ads (hoặc nhập tay ở 'Chi phí Ads'). Tài khoản chạy cho 1 store → chọn Store khi thêm. Tài khoản dùng chung nhiều store (hay gặp ở Meta) → để 'Chung' rồi bấm 'Gán store' cho từng campaign."
         actions={
           <div className="flex flex-wrap items-end gap-2">
-            <div>
+            <div className="w-full sm:w-auto">
               <span className="mb-1 block text-xs font-medium text-slate-500">
                 Kéo dữ liệu
               </span>

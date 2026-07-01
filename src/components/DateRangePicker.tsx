@@ -144,7 +144,7 @@ export function DateRangePicker({
   };
 
   return (
-    <div className="relative" ref={wrapRef}>
+    <div className="relative w-full sm:w-auto" ref={wrapRef}>
       <button
         type="button"
         disabled={disabled}
@@ -159,8 +159,17 @@ export function DateRangePicker({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-40 mt-2 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg">
-          <div className="flex flex-col sm:flex-row">
+        <>
+          {/* Dim backdrop on mobile (the panel is a centered modal there) */}
+          <div
+            className="fixed inset-0 z-40 bg-slate-900/40 sm:hidden"
+            onClick={() => setOpen(false)}
+            aria-hidden
+          />
+          <div
+            className="fixed left-1/2 top-1/2 z-50 max-h-[85vh] w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-2 sm:max-h-none sm:w-auto sm:max-w-none sm:translate-x-0 sm:translate-y-0 sm:overflow-visible"
+          >
+            <div className="flex flex-col sm:flex-row">
             {/* Presets */}
             <div className="flex max-h-64 flex-row flex-wrap gap-1 overflow-y-auto border-b border-slate-100 p-2 sm:max-h-none sm:w-44 sm:flex-col sm:flex-nowrap sm:border-b-0 sm:border-r">
               {presets(max).map((p) => (
@@ -270,7 +279,8 @@ export function DateRangePicker({
               </div>
             </div>
           </div>
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
