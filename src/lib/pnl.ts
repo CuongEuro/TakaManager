@@ -126,14 +126,15 @@ type OrderWithItems = {
   refunded: number; // total refunded to customer (incl tax)
   channel: string | null;
   // Prices on Shopify are tax-inclusive (JP 税込); back out tax per the store's
-  // rate. null store → 0 (no back-out).
-  store: { taxRate: number } | null;
+  // rate. cogsSource picks COGS method (RULE vs COST_PER_ITEM).
+  store: { taxRate: number; cogsSource: string } | null;
   lineItems: {
     productId: string | null;
     title: string;
     image: string | null;
     quantity: number;
     price: number;
+    unitCost: number; // Shopify "Cost per item" snapshot
     product: { baseCost: number; catalog: string | null; image: string | null } | null;
   }[];
 };
@@ -222,10 +223,18 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
     // % rules apply to the total the customer paid (incl tax, net of refunds) —
     // "tổng khách đã trả", not the ex-tax revenue.
     const pctBase = orderCollected(o);
+    // COGS source for this order's store: COST_PER_ITEM = use Shopify's per-item
+    // cost; RULE = use the Variable A cost rules (% / per-unit / baseCost).
+    const useShopifyCost = o.store?.cogsSource === "COST_PER_ITEM";
 
-    // Per-unit COGS (product.baseCost, else a matching per-unit COGS rule) — only
-    // when COGS is NOT already defined at order level.
-    if (!hasOrderLevelCogs) {
+    if (useShopifyCost) {
+      // COGS straight from Shopify "Cost per item" × quantity.
+      for (const li of o.lineItems) {
+        if (li.unitCost > 0) add("COGS", li.unitCost * li.quantity);
+      }
+    } else if (!hasOrderLevelCogs) {
+      // RULE mode with no order-level COGS rule → per-unit COGS (product.baseCost
+      // else a matching per-unit COGS rule).
       for (const li of o.lineItems) {
         let unitCost = li.product?.baseCost ?? 0;
         if (unitCost <= 0) {
@@ -242,7 +251,9 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
 
     // All other rules (and non-per-unit COGS) applicable to this order's store.
     for (const r of activeRules) {
-      if (r.type === "COGS" && r.calcMethod === "PER_UNIT") continue; // done above
+      // In COST_PER_ITEM mode, COGS comes from Shopify cost → skip ALL COGS rules.
+      if (r.type === "COGS" && (useShopifyCost || r.calcMethod === "PER_UNIT"))
+        continue;
       if (r.storeId !== null && r.storeId !== o.storeId) continue;
 
       if (r.calcMethod === "PER_ORDER") {
@@ -285,7 +296,7 @@ export async function computeDashboard(
       where: { organizationId, date: { gte: start, lt: end }, ...storeFilter },
       include: {
         lineItems: { include: { product: true } },
-        store: { select: { taxRate: true } },
+        store: { select: { taxRate: true, cogsSource: true } },
       },
     }),
     prisma.costRule.findMany({ where: { organizationId, active: true } }),

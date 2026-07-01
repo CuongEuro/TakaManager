@@ -25,6 +25,7 @@ export interface ShopifyOrderLineNorm {
   image: string | null;
   quantity: number;
   price: number; // original unit price
+  unitCost: number; // Shopify "Cost per item" (variant), 0 if not fetched/available
 }
 
 export interface ShopifyOrderNorm {
@@ -187,9 +188,20 @@ export async function testConnection(
 // minimal product info we need (title + image) directly from order line items
 // in sync.ts — far less data, and no `read_inventory` scope required.
 
-// NOTE: customerJourneySummary is "protected customer data". For a custom app on your
-// own store, enable it under the app's "Protected customer data access" (quick toggle).
-const ORDERS_QUERY = `
+// Orders query builder.
+//  - journey: customerJourneySummary ("protected customer data") for channel
+//    attribution. Auto-dropped if the app lacks that access.
+//  - cost: variant.inventoryItem.unitCost ("Cost per item") for accurate COGS.
+//    Requires the `read_inventory` scope — only requested when a store uses the
+//    COST_PER_ITEM COGS source.
+function ordersQuery(journey: boolean, cost: boolean): string {
+  const journeyBlock = journey
+    ? `customerJourneySummary { lastVisit { source sourceType referrerUrl utmParameters { source medium campaign } } }`
+    : "";
+  const costBlock = cost
+    ? `variant { inventoryItem { unitCost { amount } } }`
+    : "";
+  return `
 query Orders($cursor: String, $query: String) {
   orders(first: 25, after: $cursor, query: $query, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
@@ -202,53 +214,20 @@ query Orders($cursor: String, $query: String) {
       currentTotalTaxSet { shopMoney { amount } }
       totalShippingPriceSet { shopMoney { amount } }
       totalRefundedSet { shopMoney { amount } }
-      customerJourneySummary {
-        lastVisit {
-          source
-          sourceType
-          referrerUrl
-          utmParameters { source medium campaign }
-        }
-      }
+      ${journeyBlock}
       lineItems(first: 50) {
         nodes {
           title
           quantity
           originalUnitPriceSet { shopMoney { amount } }
           product { id featuredImage { url } }
+          ${costBlock}
         }
       }
     }
   }
 }`;
-
-// Fallback query without customerJourneySummary — used automatically when the
-// app doesn't have "Protected customer data access" yet (so sync still works,
-// just without per-order channel attribution).
-const ORDERS_QUERY_BASIC = `
-query Orders($cursor: String, $query: String) {
-  orders(first: 25, after: $cursor, query: $query, sortKey: CREATED_AT) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      createdAt
-      sourceName
-      totalDiscountsSet { shopMoney { amount } }
-      totalTaxSet { shopMoney { amount } }
-      currentTotalTaxSet { shopMoney { amount } }
-      totalShippingPriceSet { shopMoney { amount } }
-      totalRefundedSet { shopMoney { amount } }
-      lineItems(first: 50) {
-        nodes {
-          title
-          quantity
-          originalUnitPriceSet { shopMoney { amount } }
-          product { id featuredImage { url } }
-        }
-      }
-    }
-  }
-}`;
+}
 
 interface Visit {
   source: string | null;
@@ -280,6 +259,7 @@ interface OrdersResp {
           quantity: number;
           originalUnitPriceSet: { shopMoney: { amount: string } } | null;
           product: { id: string; featuredImage: { url: string } | null } | null;
+          variant: { inventoryItem: { unitCost: { amount: string } | null } | null } | null;
         }[];
       };
     }[];
@@ -345,6 +325,7 @@ export function normalizeOrder(
       image: li.product?.featuredImage?.url ?? null,
       quantity: li.quantity,
       price,
+      unitCost: num(li.variant?.inventoryItem?.unitCost?.amount),
     };
   });
   const attr = hasJourney
@@ -440,7 +421,8 @@ export async function fetchOrdersPage(
   since: Date,
   cursor: string | null = null,
   useJourney = true,
-  until?: Date
+  until?: Date,
+  includeCost = false
 ): Promise<OrdersPage> {
   const c = await resolveCreds(creds);
   const queryStr = orderRangeQuery(since, until);
@@ -448,21 +430,28 @@ export async function fetchOrdersPage(
 
   let data: OrdersResp;
   try {
-    data = await shopifyGraphQL<OrdersResp>(
-      c,
-      used ? ORDERS_QUERY : ORDERS_QUERY_BASIC,
-      { cursor, query: queryStr }
-    );
+    data = await shopifyGraphQL<OrdersResp>(c, ordersQuery(used, includeCost), {
+      cursor,
+      query: queryStr,
+    });
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
-    // Fall back to the lighter query when protected data isn't enabled, or when
-    // the journey-heavy query keeps failing with a gateway/throttle error (the
-    // customerJourneySummary field is the usual cause of 502/timeout).
+    // A missing read_inventory scope (cost per item) is a config error → surface
+    // it clearly instead of silently dropping cost.
+    if (includeCost && /inventory|unitCost|InventoryItem/i.test(m)) {
+      throw new Error(
+        "Cần cấp scope 'read_inventory' cho app Shopify để lấy Cost per item, rồi cài lại app lên store. (" +
+          m.slice(0, 160) +
+          ")"
+      );
+    }
+    // Otherwise fall back to the lighter query when protected data isn't enabled,
+    // or the journey-heavy query fails with a gateway/throttle error.
     const accessDenied = /customerJourney|protected|customer data|access denied|not approved|ACCESS_DENIED/i.test(m);
     const gateway = /HTTP (429|5\d\d)|throttl/i.test(m);
     if (used && (accessDenied || gateway)) {
       used = false;
-      data = await shopifyGraphQL<OrdersResp>(c, ORDERS_QUERY_BASIC, {
+      data = await shopifyGraphQL<OrdersResp>(c, ordersQuery(false, includeCost), {
         cursor,
         query: queryStr,
       });
@@ -539,13 +528,14 @@ export async function fetchRefundsPage(
 /** Fetch all orders since a date (loops fetchOrdersPage). Used by cron. */
 export async function fetchOrdersSince(
   creds: ShopifyCreds,
-  since: Date
+  since: Date,
+  includeCost = false
 ): Promise<ShopifyOrderNorm[]> {
   const out: ShopifyOrderNorm[] = [];
   let cursor: string | null = null;
   let useJourney = true;
   for (let page = 0; page < 400; page++) {
-    const p = await fetchOrdersPage(creds, since, cursor, useJourney);
+    const p = await fetchOrdersPage(creds, since, cursor, useJourney, undefined, includeCost);
     useJourney = p.usedJourney; // stay downgraded once we fall back
     out.push(...p.orders);
     if (!p.hasNext) break;
@@ -612,6 +602,7 @@ export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm 
       image: null, // webhook payload has no product image; a later sync fills it
       quantity: li.quantity,
       price,
+      unitCost: 0, // REST webhook has no cost; a later GraphQL sync fills it
     };
   });
 

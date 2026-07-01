@@ -123,6 +123,7 @@ async function upsertOrders(
       image: li.image,
       quantity: li.quantity,
       price: li.price,
+      unitCost: li.unitCost,
     }));
 
     const common = {
@@ -263,7 +264,8 @@ export async function syncStorePage(
       since,
       opts.cursor ?? null,
       opts.useJourney ?? true,
-      until
+      until,
+      store!.cogsSource === "COST_PER_ITEM" // pull Cost per item only if this store uses it
     );
     const productMap = await upsertProductsFromOrders(page.orders, storeId, organizationId);
     await upsertOrders(page.orders, storeId, organizationId, productMap);
@@ -380,7 +382,11 @@ export async function syncStore(
 
   const since = resolveSince(opts, store!.lastSyncedAt);
   try {
-    const orders = await fetchOrdersSince(creds, since);
+    const orders = await fetchOrdersSince(
+      creds,
+      since,
+      store!.cogsSource === "COST_PER_ITEM"
+    );
     const productMap = await upsertProductsFromOrders(orders, storeId, organizationId);
     await upsertOrders(orders, storeId, organizationId, productMap);
     await prisma.store.update({

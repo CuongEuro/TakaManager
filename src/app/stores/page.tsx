@@ -8,6 +8,7 @@ import {
   Card,
   Button,
   Input,
+  Select,
   Field,
   Table,
   Th,
@@ -396,6 +397,7 @@ interface Store {
   shopifyApiVersion: string;
   currency: string;
   taxRate: number;
+  cogsSource: string;
   active: boolean;
   lastSyncedAt: string | null;
   hasToken: boolean;
@@ -650,6 +652,24 @@ export default function StoresPage() {
     }
   }
 
+  async function setCogsSource(id: string, cogsSource: string) {
+    setBusy(id);
+    try {
+      await update(id, { cogsSource });
+      await load();
+      setMsg({
+        id,
+        ok: true,
+        text:
+          cogsSource === "COST_PER_ITEM"
+            ? "✓ COGS theo 'Cost per item' của Shopify. Cần app có scope read_inventory + bấm Sync lại để kéo giá vốn."
+            : "✓ COGS theo quy tắc ở 'Biến đổi A'.",
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function setCreds(id: string) {
     const clientId = window.prompt(
       "Shopify Client ID (Dev Dashboard → App → Settings → Client ID):"
@@ -784,13 +804,15 @@ export default function StoresPage() {
           </p>
           <p>
             ⚙️ Trong app, cấp <b>Admin API scopes</b>: <code>read_orders</code>,{" "}
-            <code>read_products</code> (KHÔNG cần <code>read_inventory</code>), rồi{" "}
-            <b>cài (install) app lên đúng store</b> (app & store phải cùng tổ chức).
+            <code>read_products</code>. Nếu chọn <b>Nguồn COGS = Cost per item</b> thì
+            cấp thêm <code>read_inventory</code>. Rồi <b>cài (install) app lên đúng
+            store</b> (app & store phải cùng tổ chức).
           </p>
           <p>
             📦 Hệ thống chỉ lấy <b>tiêu đề + 1 ảnh</b> của sản phẩm từ các đơn trong
             khoảng ngày đã chọn (không kéo toàn bộ catalog) → nhanh & nhẹ. Giá vốn
-            (COGS) khai ở mục <b>Biến đổi A</b>.
+            (COGS): chọn <b>Nguồn COGS</b> ở bảng dưới — theo quy tắc <b>Biến đổi A</b>{" "}
+            hoặc theo <b>Cost per item</b> của Shopify.
           </p>
           <p>
             🔒 Muốn biết đơn đến từ kênh nào (Facebook/Google/Klaviyo...), bật thêm{" "}
@@ -814,6 +836,7 @@ export default function StoresPage() {
                 <Th>Kết nối</Th>
                 <Th>Đồng bộ lần cuối</Th>
                 <Th>Thuế</Th>
+                <Th>Nguồn COGS</Th>
                 <Th className="text-right">Thao tác</Th>
               </tr>
             </thead>
@@ -840,6 +863,17 @@ export default function StoresPage() {
                       : "—"}
                   </Td>
                   <Td>{formatPercent(s.taxRate)}</Td>
+                  <Td>
+                    <Select
+                      value={s.cogsSource}
+                      onChange={(e) => setCogsSource(s.id, e.target.value)}
+                      disabled={!!busy}
+                      className="w-44"
+                    >
+                      <option value="RULE">Quy tắc (Biến đổi A)</option>
+                      <option value="COST_PER_ITEM">Cost per item (Shopify)</option>
+                    </Select>
+                  </Td>
                   <Td className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button

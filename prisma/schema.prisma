@@ -77,6 +77,9 @@ model Store {
   currency          String    @default("JPY")
   timezone          String    @default("Asia/Tokyo") // IANA tz from Shopify (shop.ianaTimezone)
   taxRate           Float     @default(0.10) // Japan consumption tax = 10%
+  // COGS source: RULE = % / per-unit rules in Variable A; COST_PER_ITEM = pull
+  // each product's Shopify "Cost per item" (needs read_inventory scope).
+  cogsSource        String    @default("RULE")
   active            Boolean   @default(true)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
@@ -337,7 +340,8 @@ model OrderLineItem {
   title     String
   image     String?
   quantity  Int      @default(1)
-  price     Float    @default(0) // unit price
+  price     Float    @default(0) // unit price (tax-incl, from Shopify)
+  unitCost  Float    @default(0) // Shopify "Cost per item" (variant), snapshot at sync
 
   @@index([orderId])
   @@index([productId])

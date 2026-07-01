@@ -22,6 +22,7 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
       shopifyApiVersion: b.shopifyApiVersion || undefined,
       currency: b.currency ?? undefined,
       taxRate: b.taxRate != null ? Number(b.taxRate) : undefined,
+      cogsSource: b.cogsSource ?? undefined,
       active: b.active ?? undefined,
     },
   });
