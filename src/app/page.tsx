@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { DashboardData } from "@/lib/pnl";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
 import {
@@ -39,19 +39,65 @@ export default function DashboardPage() {
   const [storeId, setStoreId] = useState<string>("");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshingAds, setRefreshingAds] = useState(false);
 
-  useEffect(() => {
-    setLoading(true);
+  const loadDashboard = useCallback(async (): Promise<DashboardResponse> => {
     const params = new URLSearchParams({
       from: dayStr(range.from),
       to: dayStr(range.to),
     });
     if (storeId) params.set("storeId", storeId);
-    fetch(`/api/dashboard?${params}`)
-      .then((r) => r.json())
-      .then((d) => setData(d))
-      .finally(() => setLoading(false));
+    const r = await fetch(`/api/dashboard?${params}`);
+    return r.json();
   }, [range, storeId]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    (async () => {
+      const d = await loadDashboard();
+      if (!active) return;
+      setData(d);
+      setLoading(false);
+      // Ad spend isn't realtime like orders — when the window includes today,
+      // pull a fresh light snapshot (throttled server-side) and reload silently.
+      if (dayStr(range.to) === dayStr(new Date())) {
+        setRefreshingAds(true);
+        try {
+          const rr = await fetch("/api/ads/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          }).then((x) => x.json());
+          if (active && rr.ok > 0) {
+            const d2 = await loadDashboard();
+            if (active) setData(d2);
+          }
+        } catch {
+          /* ignore — dashboard still shows last-synced spend */
+        } finally {
+          if (active) setRefreshingAds(false);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loadDashboard, range]);
+
+  async function refreshAdsNow() {
+    setRefreshingAds(true);
+    try {
+      await fetch("/api/ads/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      setData(await loadDashboard());
+    } finally {
+      setRefreshingAds(false);
+    }
+  }
 
   const s = data?.summary;
   const netTone = s && s.profit.netProfit >= 0 ? "good" : "bad";
@@ -67,6 +113,14 @@ export default function DashboardPage() {
         actions={
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             <DateRangePicker value={range} onChange={setRange} />
+            <button
+              onClick={refreshAdsNow}
+              disabled={refreshingAds}
+              title="Kéo lại chi phí Ads hôm nay ngay bây giờ"
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {refreshingAds ? "Đang cập nhật Ads…" : "🔄 Cập nhật Ads"}
+            </button>
             <div className="w-full sm:w-44">
               <Select value={storeId} onChange={(e) => setStoreId(e.target.value)}>
                 <option value="">Tất cả store</option>
