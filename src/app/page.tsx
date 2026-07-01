@@ -203,6 +203,8 @@ export default function DashboardPage() {
               <div className="space-y-1 text-sm">
                 <PnlRow label="Doanh thu (ex-tax)" value={s.revenue.revenue} strong />
                 <PnlSub label="— trong đó phí ship thu" value={s.revenue.shippingCharged} />
+                <PnlSub label="— thuế thu hộ (nộp nhà nước)" value={s.revenue.tax} />
+                <PnlSub label="— tổng khách đã trả (gồm thuế)" value={s.revenue.totalCollected} />
                 <Divider />
                 <div className="pt-1 text-xs font-semibold uppercase text-slate-400">
                   Biến đổi A (Sản xuất)
