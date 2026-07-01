@@ -125,9 +125,12 @@ export function DateRangePicker({
     }
   }
 
-  function apply() {
-    onChange({ from: startOfDay(from), to: startOfDay(to ?? from) });
+  function commit(r: DateRange) {
+    onChange({ from: startOfDay(r.from), to: startOfDay(r.to) });
     setOpen(false);
+  }
+  function apply() {
+    commit({ from, to: to ?? from });
   }
 
   const label =
@@ -176,12 +179,7 @@ export function DateRangePicker({
                 <button
                   key={p.label}
                   type="button"
-                  onClick={() => {
-                    const r = p.range();
-                    setFrom(r.from);
-                    setTo(r.to);
-                    setView(new Date(r.to.getFullYear(), r.to.getMonth(), 1));
-                  }}
+                  onClick={() => commit(p.range())}
                   className="rounded-md px-3 py-1.5 text-left text-sm text-slate-600 hover:bg-brand-50 hover:text-brand-700"
                 >
                   {p.label}
