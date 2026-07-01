@@ -479,6 +479,63 @@ export async function fetchOrdersPage(
   };
 }
 
+// Lightweight query for ONLY refunded orders — no line items, so we can pull
+// many per page and just patch the `refunded`/tax on existing orders.
+const REFUNDS_QUERY = `
+query Refunds($cursor: String, $query: String) {
+  orders(first: 100, after: $cursor, query: $query, sortKey: CREATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      totalRefundedSet { shopMoney { amount } }
+      currentTotalTaxSet { shopMoney { amount } }
+    }
+  }
+}`;
+
+export interface RefundRow {
+  externalId: string;
+  refunded: number;
+  tax: number;
+}
+export interface RefundsPage {
+  refunds: RefundRow[];
+  nextCursor: string | null;
+  hasNext: boolean;
+}
+
+/** One page of REFUNDED orders in [since, until] — only their id + refunded
+ *  amount + current tax. Filters to (partially) refunded orders so we scan a
+ *  small subset instead of every order. */
+export async function fetchRefundsPage(
+  creds: ShopifyCreds,
+  since: Date,
+  until: Date | undefined,
+  cursor: string | null = null
+): Promise<RefundsPage> {
+  const c = await resolveCreds(creds);
+  const queryStr = `${orderRangeQuery(since, until)} (financial_status:refunded OR financial_status:partially_refunded)`;
+  const data = await shopifyGraphQL<{
+    orders: {
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      nodes: {
+        id: string;
+        totalRefundedSet: { shopMoney: { amount: string } } | null;
+        currentTotalTaxSet: { shopMoney: { amount: string } } | null;
+      }[];
+    };
+  }>(c, REFUNDS_QUERY, { cursor, query: queryStr });
+  return {
+    refunds: data.orders.nodes.map((n) => ({
+      externalId: n.id,
+      refunded: num(n.totalRefundedSet?.shopMoney.amount),
+      tax: num(n.currentTotalTaxSet?.shopMoney.amount),
+    })),
+    nextCursor: data.orders.pageInfo.endCursor,
+    hasNext: data.orders.pageInfo.hasNextPage,
+  };
+}
+
 /** Fetch all orders since a date (loops fetchOrdersPage). Used by cron. */
 export async function fetchOrdersSince(
   creds: ShopifyCreds,

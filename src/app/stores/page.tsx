@@ -302,6 +302,92 @@ async function syncStoreOverRange(
   return { ok: true, products, orders, since, useJourney, skipped };
 }
 
+interface RefundsResp {
+  ok: boolean;
+  cursor: string | null;
+  hasNext: boolean;
+  pageUpdated: number;
+  pageScanned: number;
+  error?: string;
+}
+
+/** One refunds page with the same offline-pause + retry behaviour as orders. */
+async function fetchRefundsPageRetry(
+  body: Record<string, unknown>,
+  onNote: (label: string) => void,
+  attempts = 5
+): Promise<RefundsResp> {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      const res = await fetch("/api/shopify/refunds/page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 404)
+        throw new FatalSyncError(
+          "Phiên bản mới chưa sẵn sàng (HTTP 404). Chờ Vercel deploy 'Ready' rồi tải lại trang."
+        );
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error ?? `HTTP ${res.status}`);
+      }
+      const r: RefundsResp = await res.json();
+      if (!r.ok) throw new Error(r.error ?? "Lỗi cập nhật hoàn hàng");
+      return r;
+    } catch (e) {
+      if (e instanceof FatalSyncError) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (isOfflineError(msg)) {
+        onNote("mất kết nối mạng — đang chờ mạng trở lại…");
+        await waitForOnline();
+        continue;
+      }
+      attempt++;
+      if (attempt >= attempts) throw e;
+      onNote(`lỗi tạm thời, đang thử lại lần ${attempt}…`);
+      await sleep(1000 * attempt);
+    }
+  }
+}
+
+/** Update ONLY refund data for a store across [from,to] (loops refund pages). */
+async function syncStoreRefunds(
+  storeId: string,
+  from: Date,
+  to: Date,
+  prefix: string,
+  basePercent: number,
+  span: number,
+  onProgress: (p: ProgressState) => void
+): Promise<{ updated: number; scanned: number }> {
+  let cursor: string | null = null;
+  let updated = 0;
+  let scanned = 0;
+  const sinceStr = from.toISOString();
+  const untilStr = to.toISOString();
+  for (let page = 1; page <= 8000; page++) {
+    const body: Record<string, unknown> = cursor
+      ? { storeId, since: sinceStr, until: untilStr, cursor }
+      : { storeId, since: sinceStr, until: untilStr };
+    const r = await fetchRefundsPageRetry(body, (label) =>
+      onProgress({ percent: basePercent, message: `${prefix}${label}` })
+    );
+    updated += r.pageUpdated;
+    scanned += r.pageScanned;
+    cursor = r.cursor;
+    const pct = basePercent + Math.round((span * pagePct(page)) / 100);
+    onProgress({
+      percent: pct,
+      message: `${prefix}đã cập nhật ${updated} đơn hoàn (quét ${scanned})…`,
+    });
+    if (!r.hasNext) break;
+  }
+  return { updated, scanned };
+}
+
 interface Store {
   id: string;
   name: string;
@@ -489,6 +575,57 @@ export default function StoresPage() {
     }
   }
 
+  // Update ONLY refunds for all stores over the selected range — cheap vs a full
+  // order re-sync (only refunded orders, no line items).
+  async function refreshReturns() {
+    const eligible = items.filter((s) => s.hasToken || s.hasClientCreds);
+    if (eligible.length === 0) {
+      setMsg({ id: "ALL", ok: false, text: "✗ Chưa có store nào có khoá kết nối." });
+      return;
+    }
+    setBusy("RETURNS");
+    setMsg(null);
+    setProgress({ percent: 1, message: "Cập nhật hoàn hàng…" });
+    try {
+      const { from, to } = range;
+      let totUpdated = 0;
+      const n = eligible.length;
+      for (let i = 0; i < n; i++) {
+        const s = eligible[i];
+        const base = Math.round((i * 100) / n);
+        const span = Math.round(100 / n);
+        try {
+          const t = await syncStoreRefunds(
+            s.id,
+            from,
+            to,
+            `[${i + 1}/${n}] ${s.name}: `,
+            base,
+            span,
+            (p) => setProgress(p)
+          );
+          totUpdated += t.updated;
+        } catch (e) {
+          setMsg({
+            id: "ALL",
+            ok: false,
+            text: `⚠️ ${s.name}: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
+      }
+      setProgress({ percent: 100, message: "Hoàn tất" });
+      setMsg({
+        id: "ALL",
+        ok: true,
+        text: `✓ Đã cập nhật hoàn hàng cho ${totUpdated} đơn (${rangeLabel()}). Xem ở Dashboard.`,
+      });
+      await load();
+    } finally {
+      setBusy(null);
+      setProgress(null);
+    }
+  }
+
   async function enableWebhooks(id: string) {
     setBusy(id);
     setMsg(null);
@@ -559,6 +696,9 @@ export default function StoresPage() {
             >
               📊 Xem Dashboard
             </Link>
+            <Button variant="secondary" onClick={refreshReturns} disabled={!!busy}>
+              {busy === "RETURNS" ? "Đang cập nhật..." : "↩️ Cập nhật hoàn hàng"}
+            </Button>
             <Button onClick={syncAll} disabled={!!busy}>
               {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}
             </Button>

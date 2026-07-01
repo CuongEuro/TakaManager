@@ -15,6 +15,7 @@ import {
   fetchOrdersCount,
   fetchOrdersSince,
   fetchProductImages,
+  fetchRefundsPage,
   ShopifyCreds,
   ShopifyOrderNorm,
 } from "@/lib/shopify";
@@ -296,6 +297,63 @@ export async function syncStorePage(
       since: since.toISOString(),
       error: e instanceof Error ? e.message : String(e),
     };
+  }
+}
+
+// --- refunds-only sync (patch existing orders, no line-item re-pull) --------
+
+export interface RefundsPageResult {
+  ok: boolean;
+  storeId: string;
+  storeName: string;
+  cursor: string | null;
+  hasNext: boolean;
+  pageUpdated: number; // existing orders patched this page
+  pageScanned: number; // refunded orders returned this page
+  error?: string;
+}
+
+/** Sync ONE page of REFUNDED orders for a store: patch `refunded` (+ current
+ *  tax) on orders already in the DB. Cheap vs a full re-sync — only refunded
+ *  orders, no line items. The browser loops it with the returned cursor. */
+export async function syncStoreRefundsPage(
+  storeId: string,
+  organizationId: string,
+  opts: { since?: Date; until?: Date; sinceDays?: number; cursor?: string | null } = {}
+): Promise<RefundsPageResult> {
+  const { store, creds } = await storeCreds(storeId, organizationId);
+  const base = {
+    storeId,
+    storeName: store?.name ?? storeId,
+    cursor: null as string | null,
+    hasNext: false,
+    pageUpdated: 0,
+    pageScanned: 0,
+  };
+  if (!creds)
+    return { ...base, ok: false, error: "Thiếu Shopify domain hoặc khoá kết nối." };
+
+  const since = resolveSince(opts, store!.lastSyncedAt);
+  try {
+    const page = await fetchRefundsPage(creds, since, opts.until, opts.cursor ?? null);
+    let updated = 0;
+    for (const r of page.refunds) {
+      const res = await prisma.order.updateMany({
+        where: { storeId, externalId: r.externalId },
+        data: { refunded: r.refunded, tax: r.tax },
+      });
+      updated += res.count; // count 0 if the order isn't in our DB (skip)
+    }
+    return {
+      ...base,
+      ok: true,
+      cursor: page.nextCursor,
+      hasNext: page.hasNext,
+      pageUpdated: updated,
+      pageScanned: page.refunds.length,
+    };
+  } catch (e) {
+    return { ...base, ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
