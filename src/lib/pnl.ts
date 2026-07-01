@@ -178,6 +178,12 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
   const cogsPerUnitRules = activeRules.filter(
     (r) => r.type === "COGS" && r.calcMethod === "PER_UNIT"
   );
+  // If COGS is defined at ORDER level (% of revenue or per-order), that is the
+  // single source of COGS — do NOT also add product.baseCost / per-unit COGS,
+  // which would double-count (e.g. 20.7% rule + seeded baseCost → 29%).
+  const hasOrderLevelCogs = activeRules.some(
+    (r) => r.type === "COGS" && r.calcMethod !== "PER_UNIT"
+  );
 
   for (const o of orders) {
     const units = o.lineItems.reduce((s, li) => s + li.quantity, 0);
@@ -185,18 +191,21 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
     // "tổng khách đã trả", not the ex-tax revenue.
     const pctBase = orderCollected(o);
 
-    // COGS: prefer product.baseCost; else a matching per-unit COGS rule.
-    for (const li of o.lineItems) {
-      let unitCost = li.product?.baseCost ?? 0;
-      if (unitCost <= 0) {
-        const rule = cogsPerUnitRules.find(
-          (r) =>
-            (r.storeId === null || r.storeId === o.storeId) &&
-            (r.productId === null || r.productId === li.productId)
-        );
-        unitCost = rule ? rule.amount : 0;
+    // Per-unit COGS (product.baseCost, else a matching per-unit COGS rule) — only
+    // when COGS is NOT already defined at order level.
+    if (!hasOrderLevelCogs) {
+      for (const li of o.lineItems) {
+        let unitCost = li.product?.baseCost ?? 0;
+        if (unitCost <= 0) {
+          const rule = cogsPerUnitRules.find(
+            (r) =>
+              (r.storeId === null || r.storeId === o.storeId) &&
+              (r.productId === null || r.productId === li.productId)
+          );
+          unitCost = rule ? rule.amount : 0;
+        }
+        if (unitCost > 0) add("COGS", unitCost * li.quantity);
       }
-      add("COGS", unitCost * li.quantity);
     }
 
     // All other rules (and non-per-unit COGS) applicable to this order's store.
