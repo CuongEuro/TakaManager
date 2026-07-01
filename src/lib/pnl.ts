@@ -181,7 +181,9 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
 
   for (const o of orders) {
     const units = o.lineItems.reduce((s, li) => s + li.quantity, 0);
-    const rev = orderRevenue(o);
+    // % rules apply to the total the customer paid (incl tax, net of refunds) —
+    // "tổng khách đã trả", not the ex-tax revenue.
+    const pctBase = orderCollected(o);
 
     // COGS: prefer product.baseCost; else a matching per-unit COGS rule.
     for (const li of o.lineItems) {
@@ -215,7 +217,7 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
       } else if (r.calcMethod === "PERCENT_OF_REVENUE") {
         const base =
           r.productId === null
-            ? rev
+            ? pctBase
             : o.lineItems
                 .filter((li) => li.productId === r.productId)
                 .reduce((s, li) => s + li.price * li.quantity, 0);
