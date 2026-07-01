@@ -153,13 +153,13 @@ function orderCollected(o: OrderWithItems): number {
   return o.grossRevenue - o.discounts + o.shippingCharged - o.refunded;
 }
 
-/** Consumption tax for one order. Prefer Shopify's actual tax (handles
- *  tax-exempt items / mixed rates exactly); fall back to backing it out of the
- *  tax-inclusive total via the store rate if Shopify reported none. */
+/** Consumption tax to remit for one order: a FLAT rate (the store's taxRate) on
+ *  the amount collected. The business must remit 10% on the total taken,
+ *  regardless of Shopify's line-level tax (which varies with tax-exempt items /
+ *  discounts), so we use the fixed rate, not Shopify's tax field. */
 function orderTax(o: OrderWithItems): number {
-  if (o.tax > 0) return o.tax;
   const rate = o.store?.taxRate ?? 0;
-  return rate > 0 ? orderCollected(o) - orderCollected(o) / (1 + rate) : 0;
+  return orderCollected(o) * rate;
 }
 
 /** Ex-tax (net) revenue for one order = what the customer paid minus tax. */
@@ -366,7 +366,7 @@ function buildCatalogBreakdown(orders: OrderWithItems[]): CatalogRow[] {
       const cur =
         map.get(key) ?? ({ catalog: key, orders: 0, units: 0, revenue: 0 } as CatalogRow);
       cur.units += li.quantity;
-      cur.revenue += (li.price * li.quantity) / (1 + (o.store?.taxRate ?? 0));
+      cur.revenue += li.price * li.quantity * (1 - (o.store?.taxRate ?? 0));
       map.set(key, cur);
       const ids = seen.get(key) ?? new Set<string>();
       ids.add(o.id);
@@ -416,10 +416,10 @@ function buildPnl(args: {
   const { start, end, storeId, orders, rules, adSpends, fixedCosts } = args;
   const tz = args.timezone ?? DEFAULT_TZ;
 
-  // Revenue. Shopify prices are tax-inclusive (JP 税込). Use Shopify's ACTUAL
-  // per-order tax (matches Shopify's Taxes report exactly, incl tax-exempt /
-  // mixed rates). revenue is ex-tax (profit base); tax is collected on behalf of
-  // the tax office (to remit); totalCollected = what customers actually paid.
+  // Revenue. Tax to remit is a FLAT rate (store taxRate) on the amount collected
+  // — the business owes 10% on total taken regardless of Shopify's variable
+  // line-level tax. revenue is ex-tax (profit base) = collected × (1 − rate);
+  // totalCollected = what customers actually paid (net of refunds).
   const grossSales = sum(orders, (o) => o.grossRevenue);
   const discounts = sum(orders, (o) => o.discounts);
   const shippingCharged = sum(orders, (o) => o.shippingCharged);
@@ -460,8 +460,8 @@ function buildPnl(args: {
     const totalRev = args.allOrdersForShare.reduce(
       (s, o) =>
         s +
-        (o.grossRevenue - o.discounts + o.shippingCharged - o.refunded) /
-          (1 + (o.store?.taxRate ?? 0)),
+        (o.grossRevenue - o.discounts + o.shippingCharged - o.refunded) *
+          (1 - (o.store?.taxRate ?? 0)),
       0
     );
     revenueShare = totalRev > 0 ? revenue / totalRev : 0;
@@ -644,7 +644,7 @@ function buildBestSellers(orders: OrderWithItems[]): BestSeller[] {
           revenue: 0,
         } as BestSeller);
       cur.units += li.quantity;
-      cur.revenue += (li.price * li.quantity) / (1 + (o.store?.taxRate ?? 0));
+      cur.revenue += li.price * li.quantity * (1 - (o.store?.taxRate ?? 0));
       cur.orders += 1;
       if (!cur.image && img) cur.image = img;
       map.set(key, cur);
