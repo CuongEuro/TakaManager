@@ -477,9 +477,11 @@ function buildPnl(args: {
       amount =
         fc.startDate >= start && fc.startDate < end ? fc.amount : 0;
     } else {
-      // Prorate over the overlap of the range and the cost's active window,
-      // dividing by each day's REAL month/year length (e.g. /28, /30, /31).
-      const s = Math.max(start.getTime(), fc.startDate.getTime());
+      // Recurring cost: count the WHOLE selected range so a full month shows the
+      // full monthly cost (not prorated from the day it was entered). The query
+      // already excludes future-dated costs (startDate < end); endDate still
+      // stops a cancelled cost. Divide by each day's REAL month/year length.
+      const s = start.getTime();
       const e = Math.min(end.getTime(), (fc.endDate ?? end).getTime());
       amount =
         e > s

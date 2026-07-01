@@ -113,6 +113,18 @@ export default function VariableAPage() {
       : formatJPY(r.amount);
   }
 
+  // Summary per type → reveals duplicate rules (e.g. two COGS rules stacking).
+  const typeSummary = items.reduce(
+    (acc, r) => {
+      const t = (acc[r.type] ??= { count: 0, pct: 0, other: false });
+      t.count++;
+      if (r.calcMethod === "PERCENT_OF_REVENUE") t.pct += r.amount;
+      else t.other = true;
+      return acc;
+    },
+    {} as Record<string, { count: number; pct: number; other: boolean }>
+  );
+
   return (
     <div>
       <PageHeader
@@ -185,6 +197,27 @@ export default function VariableAPage() {
           thường <b>Theo đơn hàng</b>.
         </p>
       </Card>
+
+      {!loading && items.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-slate-500">Tổng theo loại:</span>
+          {Object.entries(typeSummary).map(([t, sMeta]) => (
+            <span
+              key={t}
+              className={`rounded px-2 py-1 text-xs ${
+                sMeta.count > 1
+                  ? "bg-amber-100 font-medium text-amber-800"
+                  : "bg-slate-100 text-slate-600"
+              }`}
+              title={sMeta.count > 1 ? "Có nhiều quy tắc cùng loại — cộng dồn!" : ""}
+            >
+              {COST_RULE_TYPE_LABELS[t] ?? t}: {sMeta.count} quy tắc
+              {sMeta.pct > 0 ? ` · ${formatPercent(sMeta.pct)} DT` : ""}
+              {sMeta.other ? " · +cố định/theo cái" : ""}
+            </span>
+          ))}
+        </div>
+      )}
 
       <Card>
         {loading ? (
