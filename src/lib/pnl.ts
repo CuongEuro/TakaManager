@@ -167,6 +167,38 @@ function orderRevenue(o: OrderWithItems): number {
   return orderCollected(o) - orderTax(o);
 }
 
+type FixedCostRow = {
+  storeId: string | null;
+  category: string;
+  amount: number;
+  billingCycle: string;
+  startDate: Date;
+  endDate: Date | null;
+};
+
+/** Amount of one fixed cost that falls in [start, end) (prorated for recurring;
+ *  full monthly amount for a full month — see the ONE_TIME vs recurring rule). */
+function proratedFixed(
+  fc: FixedCostRow,
+  start: Date,
+  end: Date,
+  tz: string
+): number {
+  if (fc.billingCycle === "ONE_TIME")
+    return fc.startDate >= start && fc.startDate < end ? fc.amount : 0;
+  const s = start.getTime();
+  const e = Math.min(end.getTime(), (fc.endDate ?? end).getTime());
+  return e > s
+    ? proratePeriodic(
+        fc.amount,
+        fc.billingCycle === "YEARLY" ? "YEARLY" : "MONTHLY",
+        new Date(s),
+        new Date(e),
+        tz
+      )
+    : 0;
+}
+
 /** Variable A breakdown for a set of orders given the cost rules. */
 function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
   const byType: Record<string, number> = {};
@@ -297,7 +329,16 @@ export async function computeDashboard(
   });
 
   const daily = buildDailySeries(start, end, orders, adSpends, rules, fixedCosts, storeId ?? null, summary.fixed.total, tz);
-  const stores = buildStoreBreakdown(allStores, orders, adSpends, rules);
+  const stores = buildStoreBreakdown(
+    allStores,
+    orders,
+    adSpends,
+    rules,
+    fixedCosts,
+    start,
+    end,
+    tz
+  );
   const bestSellers = buildBestSellers(orders);
   const channels = buildChannelBreakdown(orders);
   const catalogs = buildCatalogBreakdown(orders);
@@ -481,28 +522,7 @@ function buildPnl(args: {
   const fixedByCategory: Record<string, number> = {};
   for (const fc of fixedCosts) {
     if (storeId && fc.storeId && fc.storeId !== storeId) continue;
-    let amount: number;
-    if (fc.billingCycle === "ONE_TIME") {
-      amount =
-        fc.startDate >= start && fc.startDate < end ? fc.amount : 0;
-    } else {
-      // Recurring cost: count the WHOLE selected range so a full month shows the
-      // full monthly cost (not prorated from the day it was entered). The query
-      // already excludes future-dated costs (startDate < end); endDate still
-      // stops a cancelled cost. Divide by each day's REAL month/year length.
-      const s = start.getTime();
-      const e = Math.min(end.getTime(), (fc.endDate ?? end).getTime());
-      amount =
-        e > s
-          ? proratePeriodic(
-              fc.amount,
-              fc.billingCycle === "YEARLY" ? "YEARLY" : "MONTHLY",
-              new Date(s),
-              new Date(e),
-              tz
-            )
-          : 0;
-    }
+    let amount = proratedFixed(fc, start, end, tz);
     // allocate shared (company-wide) fixed costs by revenue share for store view
     if (storeId && fc.storeId === null) amount *= revenueShare;
     fixedByCategory[fc.category] = (fixedByCategory[fc.category] ?? 0) + amount;
@@ -609,8 +629,14 @@ function buildStoreBreakdown(
   stores: { id: string; name: string }[],
   orders: OrderWithItems[],
   adSpends: { storeId: string | null; spend: number; revenue: number }[],
-  rules: Rule[]
+  rules: Rule[],
+  fixedCosts: FixedCostRow[],
+  start: Date,
+  end: Date,
+  tz: string
 ): StoreRow[] {
+  // Company-wide revenue (ex-tax) → to split shared fixed costs by store share.
+  const totalRevAll = orders.reduce((acc, o) => acc + orderRevenue(o), 0);
   const rows: StoreRow[] = [];
   for (const s of stores) {
     const sOrders = orders.filter((o) => o.storeId === s.id);
@@ -624,7 +650,15 @@ function buildStoreBreakdown(
     const attributed = adSpends
       .filter((a) => a.storeId === s.id)
       .reduce((acc, a) => acc + a.revenue, 0);
-    const netProfit = revenue - varA - adSpend; // store view excludes shared fixed
+    // Fixed: this store's own costs in full + company-wide costs by revenue share.
+    const share = totalRevAll > 0 ? revenue / totalRevAll : 0;
+    let fixed = 0;
+    for (const fc of fixedCosts) {
+      if (fc.storeId && fc.storeId !== s.id) continue;
+      const amt = proratedFixed(fc, start, end, tz);
+      fixed += fc.storeId === null ? amt * share : amt;
+    }
+    const netProfit = revenue - varA - adSpend - fixed;
     rows.push({
       storeId: s.id,
       storeName: s.name,
