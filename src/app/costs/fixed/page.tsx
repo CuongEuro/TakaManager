@@ -46,6 +46,19 @@ function monthlyEquivalent(amount: number, cycle: string): number {
   return 0; // ONE_TIME
 }
 
+// Default "effective from" = first day of the current month, so a monthly cost
+// counts in full for the current month instead of only from its creation day.
+function firstOfMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+const toYmd = (iso: string) => (iso ? iso.slice(0, 10) : "");
+function fmtDate(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
+}
+
 export default function FixedCostsPage() {
   const { items, loading, create, update, remove } =
     useResource<FixedCost>("/api/fixed-costs");
@@ -57,6 +70,7 @@ export default function FixedCostsPage() {
     name: "",
     amount: "",
     billingCycle: "MONTHLY",
+    startDate: firstOfMonth(),
   });
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -66,6 +80,7 @@ export default function FixedCostsPage() {
     name: "",
     amount: "",
     billingCycle: "MONTHLY",
+    startDate: "",
   });
   const [saving, setSaving] = useState(false);
 
@@ -77,6 +92,7 @@ export default function FixedCostsPage() {
       name: form.name.trim(),
       amount: Number(form.amount),
       billingCycle: form.billingCycle,
+      startDate: form.startDate || undefined,
     });
     setForm({ ...form, name: "", amount: "" });
   }
@@ -89,6 +105,7 @@ export default function FixedCostsPage() {
       name: i.name,
       amount: String(i.amount),
       billingCycle: i.billingCycle,
+      startDate: toYmd(i.startDate),
     });
   }
 
@@ -102,6 +119,7 @@ export default function FixedCostsPage() {
         name: edit.name.trim(),
         amount: Number(edit.amount),
         billingCycle: edit.billingCycle,
+        startDate: edit.startDate || undefined,
       });
       setEditingId(null);
     } finally {
@@ -127,7 +145,7 @@ export default function FixedCostsPage() {
       />
 
       <Card className="mb-6">
-        <div className="grid gap-3 md:grid-cols-6 md:items-end">
+        <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-7 md:items-end">
           <Field label="Store (trống = toàn công ty)">
             <Select
               value={form.storeId}
@@ -181,6 +199,13 @@ export default function FixedCostsPage() {
               ))}
             </Select>
           </Field>
+          <Field label="Áp dụng từ">
+            <Input
+              type="date"
+              value={form.startDate}
+              onChange={(e) => setForm({ ...form, startDate: e.target.value })}
+            />
+          </Field>
           <Button onClick={add}>+ Thêm</Button>
         </div>
       </Card>
@@ -199,6 +224,7 @@ export default function FixedCostsPage() {
                 <Th>Phạm vi</Th>
                 <Th className="text-right">Số tiền</Th>
                 <Th>Chu kỳ</Th>
+                <Th>Áp dụng từ</Th>
                 <Th className="text-right">≈ /tháng</Th>
                 <Th></Th>
               </tr>
@@ -258,6 +284,13 @@ export default function FixedCostsPage() {
                         ))}
                       </Select>
                     </Td>
+                    <Td>
+                      <Input
+                        type="date"
+                        value={edit.startDate}
+                        onChange={(e) => setEdit({ ...edit, startDate: e.target.value })}
+                      />
+                    </Td>
                     <Td className="text-right tabular-nums text-slate-500">
                       {formatJPY(
                         monthlyEquivalent(Number(edit.amount) || 0, edit.billingCycle)
@@ -291,6 +324,7 @@ export default function FixedCostsPage() {
                     <Td className="text-slate-500">
                       {BILLING_CYCLE_LABELS[i.billingCycle] ?? i.billingCycle}
                     </Td>
+                    <Td className="text-slate-500">{fmtDate(i.startDate)}</Td>
                     <Td className="text-right tabular-nums text-slate-500">
                       {formatJPY(monthlyEquivalent(i.amount, i.billingCycle))}
                     </Td>
