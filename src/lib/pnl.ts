@@ -123,6 +123,9 @@ type OrderWithItems = {
   tax: number;
   shippingCharged: number;
   channel: string | null;
+  // Prices on Shopify are tax-inclusive (JP 税込); back out tax per the store's
+  // rate. null store → 0 (no back-out).
+  store: { taxRate: number } | null;
   lineItems: {
     productId: string | null;
     title: string;
@@ -142,9 +145,16 @@ type Rule = {
   active: boolean;
 };
 
-/** net (pre-tax, post-discount) product revenue + shipping for one order */
-function orderRevenue(o: OrderWithItems): number {
+/** Tax-inclusive amount the customer paid (product net + shipping), one order. */
+function orderCollected(o: OrderWithItems): number {
   return o.grossRevenue - o.discounts + o.shippingCharged;
+}
+
+/** Ex-tax (net) revenue for one order: back the consumption tax out of the
+ *  tax-inclusive amount using the store's rate (JP 税込 pricing). */
+function orderRevenue(o: OrderWithItems): number {
+  const rate = o.store?.taxRate ?? 0;
+  return orderCollected(o) / (1 + rate);
 }
 
 /** Variable A breakdown for a set of orders given the cost rules. */
@@ -220,7 +230,10 @@ export async function computeDashboard(
   const [orders, rules, adSpends, fixedCosts, allStores] = await Promise.all([
     prisma.order.findMany({
       where: { organizationId, date: { gte: start, lt: end }, ...storeFilter },
-      include: { lineItems: { include: { product: true } } },
+      include: {
+        lineItems: { include: { product: true } },
+        store: { select: { taxRate: true } },
+      },
     }),
     prisma.costRule.findMany({ where: { organizationId, active: true } }),
     prisma.adSpend.findMany({
@@ -251,7 +264,12 @@ export async function computeDashboard(
     allOrdersForShare: storeId
       ? await prisma.order.findMany({
           where: { organizationId, date: { gte: start, lt: end } },
-          select: { storeId: true, grossRevenue: true, discounts: true, shippingCharged: true },
+          select: {
+            grossRevenue: true,
+            discounts: true,
+            shippingCharged: true,
+            store: { select: { taxRate: true } },
+          },
         })
       : null,
   });
@@ -337,7 +355,7 @@ function buildCatalogBreakdown(orders: OrderWithItems[]): CatalogRow[] {
       const cur =
         map.get(key) ?? ({ catalog: key, orders: 0, units: 0, revenue: 0 } as CatalogRow);
       cur.units += li.quantity;
-      cur.revenue += li.price * li.quantity;
+      cur.revenue += (li.price * li.quantity) / (1 + (o.store?.taxRate ?? 0));
       map.set(key, cur);
       const ids = seen.get(key) ?? new Set<string>();
       ids.add(o.id);
@@ -374,21 +392,31 @@ function buildPnl(args: {
     endDate: Date | null;
   }[];
   allOrdersForShare:
-    | { storeId: string; grossRevenue: number; discounts: number; shippingCharged: number }[]
+    | {
+        grossRevenue: number;
+        discounts: number;
+        shippingCharged: number;
+        store: { taxRate: number } | null;
+      }[]
     | null;
   timezone?: string;
 }): PnlResult {
   const { start, end, storeId, orders, rules, adSpends, fixedCosts } = args;
   const tz = args.timezone ?? DEFAULT_TZ;
 
-  // Revenue
+  // Revenue. Shopify prices are tax-inclusive (JP 税込): back the consumption
+  // tax out per each order's store rate. revenue is ex-tax (the profit base);
+  // tax is what's collected on behalf of the tax office (to remit).
   const grossSales = sum(orders, (o) => o.grossRevenue);
   const discounts = sum(orders, (o) => o.discounts);
-  const tax = sum(orders, (o) => o.tax);
-  const shippingCharged = sum(orders, (o) => o.shippingCharged);
-  const netSales = grossSales - discounts;
-  const revenue = netSales + shippingCharged;
-  const totalCollected = revenue + tax;
+  const totalCollected = sum(orders, orderCollected); // what customers paid (incl tax)
+  const revenue = sum(orders, orderRevenue); // ex-tax revenue base
+  const tax = totalCollected - revenue; // consumption tax to remit
+  const shippingCharged = sum(
+    orders,
+    (o) => o.shippingCharged / (1 + (o.store?.taxRate ?? 0))
+  ); // ex-tax shipping (display)
+  const netSales = revenue - shippingCharged; // ex-tax product revenue
   const units = orders.reduce(
     (s, o) => s + o.lineItems.reduce((a, li) => a + li.quantity, 0),
     0
@@ -419,7 +447,10 @@ function buildPnl(args: {
   let revenueShare = 1;
   if (storeId && args.allOrdersForShare) {
     const totalRev = args.allOrdersForShare.reduce(
-      (s, o) => s + (o.grossRevenue - o.discounts + o.shippingCharged),
+      (s, o) =>
+        s +
+        (o.grossRevenue - o.discounts + o.shippingCharged) /
+          (1 + (o.store?.taxRate ?? 0)),
       0
     );
     revenueShare = totalRev > 0 ? revenue / totalRev : 0;
@@ -601,7 +632,7 @@ function buildBestSellers(orders: OrderWithItems[]): BestSeller[] {
           revenue: 0,
         } as BestSeller);
       cur.units += li.quantity;
-      cur.revenue += li.price * li.quantity;
+      cur.revenue += (li.price * li.quantity) / (1 + (o.store?.taxRate ?? 0));
       cur.orders += 1;
       if (!cur.image && img) cur.image = img;
       map.set(key, cur);
