@@ -145,16 +145,24 @@ type Rule = {
   active: boolean;
 };
 
-/** Tax-inclusive amount the customer paid (product net + shipping), one order. */
+/** Tax-inclusive amount the customer paid (product net + shipping), one order.
+ *  Prices are 税込 so this already includes the consumption tax. */
 function orderCollected(o: OrderWithItems): number {
   return o.grossRevenue - o.discounts + o.shippingCharged;
 }
 
-/** Ex-tax (net) revenue for one order: back the consumption tax out of the
- *  tax-inclusive amount using the store's rate (JP 税込 pricing). */
-function orderRevenue(o: OrderWithItems): number {
+/** Consumption tax for one order. Prefer Shopify's actual tax (handles
+ *  tax-exempt items / mixed rates exactly); fall back to backing it out of the
+ *  tax-inclusive total via the store rate if Shopify reported none. */
+function orderTax(o: OrderWithItems): number {
+  if (o.tax > 0) return o.tax;
   const rate = o.store?.taxRate ?? 0;
-  return orderCollected(o) / (1 + rate);
+  return rate > 0 ? orderCollected(o) - orderCollected(o) / (1 + rate) : 0;
+}
+
+/** Ex-tax (net) revenue for one order = what the customer paid minus tax. */
+function orderRevenue(o: OrderWithItems): number {
+  return orderCollected(o) - orderTax(o);
 }
 
 /** Variable A breakdown for a set of orders given the cost rules. */
@@ -404,19 +412,17 @@ function buildPnl(args: {
   const { start, end, storeId, orders, rules, adSpends, fixedCosts } = args;
   const tz = args.timezone ?? DEFAULT_TZ;
 
-  // Revenue. Shopify prices are tax-inclusive (JP 税込): back the consumption
-  // tax out per each order's store rate. revenue is ex-tax (the profit base);
-  // tax is what's collected on behalf of the tax office (to remit).
+  // Revenue. Shopify prices are tax-inclusive (JP 税込). Use Shopify's ACTUAL
+  // per-order tax (matches Shopify's Taxes report exactly, incl tax-exempt /
+  // mixed rates). revenue is ex-tax (profit base); tax is collected on behalf of
+  // the tax office (to remit); totalCollected = what customers actually paid.
   const grossSales = sum(orders, (o) => o.grossRevenue);
   const discounts = sum(orders, (o) => o.discounts);
-  const totalCollected = sum(orders, orderCollected); // what customers paid (incl tax)
-  const revenue = sum(orders, orderRevenue); // ex-tax revenue base
-  const tax = totalCollected - revenue; // consumption tax to remit
-  const shippingCharged = sum(
-    orders,
-    (o) => o.shippingCharged / (1 + (o.store?.taxRate ?? 0))
-  ); // ex-tax shipping (display)
-  const netSales = revenue - shippingCharged; // ex-tax product revenue
+  const shippingCharged = sum(orders, (o) => o.shippingCharged);
+  const totalCollected = sum(orders, orderCollected); // customer paid (incl tax)
+  const tax = sum(orders, orderTax); // consumption tax to remit
+  const revenue = totalCollected - tax; // ex-tax revenue base
+  const netSales = revenue - shippingCharged; // ex-tax product revenue (approx)
   const units = orders.reduce(
     (s, o) => s + o.lineItems.reduce((a, li) => a + li.quantity, 0),
     0
