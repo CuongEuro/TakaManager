@@ -3,6 +3,7 @@ import { resolveRange, RangePreset } from "@/lib/dates";
 import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
 import { computeStoreBreakEvens } from "@/lib/pnl";
+import { computeCampaignAttribution } from "@/lib/attribution";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +22,22 @@ export async function GET(req: NextRequest) {
     getAdTree(range, { organizationId: session.oid, storeId, platform }),
     computeStoreBreakEvens(session.oid, range.start, range.end),
   ]);
+
+  // Real Shopify revenue per campaign (utm_campaign = campaign name).
+  const attr = await computeCampaignAttribution(
+    session.oid,
+    range,
+    tree.campaigns,
+    { storeId }
+  );
+  for (const c of tree.campaigns) {
+    const real = attr.byCampaignId.get(c.id);
+    if (real) {
+      c.realOrders = real.realOrders;
+      c.realRevenue = real.realRevenue;
+      c.realRoas = c.spend > 0 ? real.realRevenue / c.spend : 0;
+    }
+  }
 
   // Judge every campaign against ITS store's break-even (margins differ per
   // store); the blended number remains the summary bar / fallback.
@@ -43,5 +60,13 @@ export async function GET(req: NextRequest) {
     aov: bes.aov,
     tree,
     optimize,
+    attribution: {
+      matchRate: attr.matchRate,
+      matchRateByPlatform: attr.matchRateByPlatform,
+      paidOrders: attr.paidOrders,
+      matchedOrders: attr.matchedOrders,
+      taggedOrders: attr.taggedOrders,
+      unmatchedTop: attr.unmatchedTop,
+    },
   });
 }

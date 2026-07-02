@@ -4,6 +4,7 @@ import { resolveRange, RangePreset } from "@/lib/dates";
 import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
 import { computeStoreBreakEvens } from "@/lib/pnl";
+import { computeCampaignAttribution } from "@/lib/attribution";
 import { aiOptimize } from "@/lib/ai";
 import { getSession } from "@/lib/auth";
 
@@ -30,6 +31,22 @@ export async function POST(req: NextRequest) {
         })
       : Promise.resolve(null),
   ]);
+
+  // Decorate campaigns with real Shopify revenue so the AI sees both ROAS.
+  const attr = await computeCampaignAttribution(
+    session.oid,
+    range,
+    tree.campaigns,
+    { storeId }
+  );
+  for (const c of tree.campaigns) {
+    const real = attr.byCampaignId.get(c.id);
+    if (real) {
+      c.realOrders = real.realOrders;
+      c.realRevenue = real.realRevenue;
+      c.realRoas = c.spend > 0 ? real.realRevenue / c.spend : 0;
+    }
+  }
 
   const breakEvenRoas =
     (storeId ? bes.byStore.get(storeId) : undefined) ?? bes.blended;

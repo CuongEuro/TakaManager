@@ -36,6 +36,11 @@ export interface CampaignNode extends Kpis {
   storeId: string | null; // campaign mapping ?? account store
   dataLevel: "adset" | "campaign"; // "campaign" = KPIs from AdSpend fallback
   adsets: AdsetNode[];
+  // Shopify-attributed reality (filled by the optimize route from
+  // computeCampaignAttribution — utm_campaign name matching):
+  realOrders?: number;
+  realRevenue?: number; // ex-tax
+  realRoas?: number; // realRevenue / spend
 }
 
 export interface AdTree {

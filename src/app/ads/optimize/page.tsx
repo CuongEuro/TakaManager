@@ -14,13 +14,29 @@ import {
 } from "@/lib/format";
 import { Card, PageHeader, Select, EmptyState, Badge, Button } from "@/components/ui";
 
+interface AttributionInfo {
+  matchRate: number;
+  matchRateByPlatform: Record<string, number>;
+  paidOrders: number;
+  matchedOrders: number;
+  taggedOrders: number;
+  unmatchedTop: {
+    utmCampaign: string;
+    channel: string;
+    orders: number;
+    revenue: number;
+  }[];
+}
+
 interface OptimizeResponse {
   preset: RangePreset;
   storeId: string | null;
   platform: string | null;
   breakEvenRoas: number;
+  aov: number;
   tree: AdTree;
   optimize: OptimizeResult;
+  attribution: AttributionInfo;
 }
 
 const PRESETS: RangePreset[] = ["last7", "thisMonth", "last30", "lastMonth"];
@@ -209,6 +225,52 @@ export default function OptimizePage() {
             )}
           </Card>
 
+          {/* UTM reconciliation — how trustworthy the "Shopify ROAS" column is */}
+          {data.attribution && data.attribution.paidOrders > 0 && (
+            <Card>
+              <details>
+                <summary className="cursor-pointer text-sm font-semibold text-slate-700">
+                  Đối soát UTM — khớp {formatPercent(data.attribution.matchRate)} (
+                  {formatNumber(data.attribution.matchedOrders)}/
+                  {formatNumber(data.attribution.paidOrders)} đơn kênh trả phí)
+                </summary>
+                <div className="mt-3 space-y-3 text-xs text-slate-500">
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(data.attribution.matchRateByPlatform).map(
+                      ([p, r]) => (
+                        <Badge key={p} tone={r >= 0.6 ? "green" : "amber"}>
+                          {AD_PLATFORM_LABELS[p] ?? p}: {formatPercent(r)}
+                        </Badge>
+                      )
+                    )}
+                  </div>
+                  {data.attribution.unmatchedTop.length > 0 && (
+                    <div>
+                      <div className="mb-1 font-medium text-slate-600">
+                        utm_campaign chưa khớp campaign nào (top theo doanh thu):
+                      </div>
+                      <ul className="list-disc space-y-0.5 pl-5">
+                        {data.attribution.unmatchedTop.map((u) => (
+                          <li key={u.utmCampaign}>
+                            <span className="font-mono">{u.utmCampaign}</span> —{" "}
+                            {formatNumber(u.orders)} đơn · {formatJPY(u.revenue)}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <p>
+                    Cột &quot;Shopify&quot; = doanh thu thật từ đơn Shopify có
+                    utm_campaign trùng TÊN campaign. Để khớp tối đa: đặt{" "}
+                    <code>utm_campaign</code> đúng bằng tên campaign (Meta có thể
+                    dùng <code>{"{{campaign.name}}"}</code>), tránh đổi tên campaign
+                    đang chạy.
+                  </p>
+                </div>
+              </details>
+            </Card>
+          )}
+
           {/* Campaign → adset tree */}
           <div className="space-y-3">
             {data.tree.campaigns.map((c) => {
@@ -249,6 +311,25 @@ export default function OptimizePage() {
                         )}
                     </span>
                     <KpiInline k={c} be={reco?.breakEven ?? data.breakEvenRoas} />
+                    {c.realRoas != null && (
+                      <span
+                        className={`hidden text-xs font-semibold md:inline ${
+                          c.realRoas >= (reco?.breakEven ?? data.breakEvenRoas)
+                            ? "text-emerald-600"
+                            : "text-rose-600"
+                        }`}
+                        title={`Doanh thu Shopify ${formatJPY(
+                          c.realRevenue ?? 0
+                        )} · ${formatNumber(c.realOrders ?? 0)} đơn (khớp utm_campaign)`}
+                      >
+                        Shopify {formatMultiplier(c.realRoas)}
+                      </span>
+                    )}
+                    {c.realRoas != null &&
+                      c.spend >= 3000 &&
+                      c.roas > 1.5 * c.realRoas && (
+                        <Badge tone="amber">⚠ Platform khai cao</Badge>
+                      )}
                     {reco && <Badge tone={ACTION_TONE[reco.action]}>{ACTION_LABELS[reco.action]}</Badge>}
                   </button>
 
