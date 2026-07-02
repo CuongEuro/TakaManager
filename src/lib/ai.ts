@@ -1,22 +1,59 @@
 // ---------------------------------------------------------------------------
 // AI OPTIMIZER — uses Claude (Anthropic SDK) to turn the campaign→adset KPI tree
 // + rule-based recommendations into a media-buying strategy (in Vietnamese).
+// v2: sends real Shopify ROAS / per-campaign break-even / trends / budget plan
+// and asks for STRUCTURED JSON (falls back to raw text if parsing fails).
 // Degrades gracefully when ANTHROPIC_API_KEY is not set.
 // ---------------------------------------------------------------------------
 import Anthropic from "@anthropic-ai/sdk";
 import { AdTree } from "@/lib/adinsights";
 import { OptimizeResult } from "@/lib/optimize";
 
+export const AI_MODEL = "claude-opus-4-8";
+
+export interface AiAction {
+  target: string;
+  level: "CAMPAIGN" | "ADSET";
+  platform: string;
+  action:
+    | "SCALE"
+    | "REDUCE"
+    | "PAUSE"
+    | "KEEP"
+    | "FIX_CREATIVE"
+    | "FIX_LANDING"
+    | "FIX_TRACKING";
+  detail: string;
+  expectedImpact: string;
+}
+
+export interface AiStrategy {
+  summary: string;
+  actions: AiAction[];
+  creativeIdeas: string[];
+}
+
 export interface AiOptimizeResult {
   ok: boolean;
-  text?: string;
+  text?: string; // raw model output (audit / fallback rendering)
+  json?: AiStrategy | null; // parsed structured strategy (null if unparsable)
   error?: string;
 }
 
 // Compact the tree so we send only what's needed (control token cost).
-function buildPayload(tree: AdTree, rules: OptimizeResult) {
+function buildPayload(
+  tree: AdTree,
+  rules: OptimizeResult,
+  extra: { matchRate?: number; aov?: number }
+) {
+  const beByCampaign = new Map<string, number>();
+  for (const r of rules.recommendations)
+    if (r.level === "CAMPAIGN") beByCampaign.set(r.id, r.breakEven);
+
   return {
     breakEvenRoas: Number(rules.breakEvenRoas.toFixed(2)),
+    aov: Math.round(extra.aov ?? 0),
+    utmMatchRate: Number(((extra.matchRate ?? 0) * 100).toFixed(0)), // %
     totals: {
       spend: Math.round(tree.totals.spend),
       revenue: Math.round(tree.totals.revenue),
@@ -24,16 +61,34 @@ function buildPayload(tree: AdTree, rules: OptimizeResult) {
       conversions: Math.round(tree.totals.conversions),
     },
     ruleCounts: rules.counts,
+    budgetPlan: rules.budgetPlan.slice(0, 8).map((m) => ({
+      platform: m.platform,
+      to: m.to,
+      dailyAmount: m.dailyAmount,
+      estDailyProfit: m.estDailyProfit,
+    })),
     campaigns: tree.campaigns.slice(0, 40).map((c) => ({
       name: c.name,
       platform: c.platform,
+      status: c.status,
+      dataLevel: c.dataLevel,
+      breakEven: Number((beByCampaign.get(c.id) ?? rules.breakEvenRoas).toFixed(2)),
       spend: Math.round(c.spend),
       revenue: Math.round(c.revenue),
       roas: Number(c.roas.toFixed(2)),
+      realRoasShopify: c.realRoas != null ? Number(c.realRoas.toFixed(2)) : null,
+      realOrdersShopify: c.realOrders ?? null,
       conversions: Math.round(c.conversions),
       cpa: Math.round(c.cpa),
       ctr: Number((c.ctr * 100).toFixed(2)),
       cvr: Number((c.cvr * 100).toFixed(2)),
+      trend: c.trend
+        ? {
+            roasDeltaPct: Number((c.trend.roasDelta * 100).toFixed(0)),
+            ctrDeltaPct: Number((c.trend.ctrDelta * 100).toFixed(0)),
+            flags: c.trend.flags,
+          }
+        : null,
       adsets: c.adsets.slice(0, 12).map((a) => ({
         name: a.name,
         status: a.status,
@@ -44,6 +99,7 @@ function buildPayload(tree: AdTree, rules: OptimizeResult) {
         cpa: Math.round(a.cpa),
         ctr: Number((a.ctr * 100).toFixed(2)),
         cvr: Number((a.cvr * 100).toFixed(2)),
+        trendFlags: a.trend?.flags ?? [],
       })),
     })),
   };
@@ -51,25 +107,82 @@ function buildPayload(tree: AdTree, rules: OptimizeResult) {
 
 const SYSTEM_PROMPT = `Bạn là chuyên gia mua quảng cáo (media buyer) cấp cao cho doanh nghiệp Print-on-Demand bán tại thị trường Nhật Bản, chạy đa nền tảng Facebook/Meta, Google, Twitter/X.
 
-Bạn nhận dữ liệu hiệu suất theo cấu trúc Campaign → Adset kèm KPI (spend, revenue, ROAS, conversions, CPA, CTR%, CVR%) và một điểm hoà vốn ROAS (break-even). Nhiệm vụ: đưa ra CHIẾN LƯỢC ĐIỀU CHỈNH cụ thể, có thể hành động ngay.
+Bạn nhận dữ liệu Campaign → Adset kèm KPI (spend, revenue, ROAS, conversions, CPA, CTR%, CVR%), điểm hoà vốn ROAS RIÊNG từng campaign (breakEven — theo biên lợi nhuận store của campaign đó), ROAS THỰC từ Shopify (realRoasShopify — doanh thu đơn hàng thật khớp utm_campaign; đáng tin hơn số nền tảng tự báo khi utmMatchRate cao), xu hướng nửa kỳ sau vs nửa kỳ trước (trend: WORSENING/IMPROVING/FATIGUE/NEW), và một kế hoạch tái phân bổ ngân sách sơ bộ (budgetPlan).
 
 Nguyên tắc:
-- ROAS ≥ break-even là có lãi; càng cao hơn càng nên tăng ngân sách (scale). Dưới break-even là đang lỗ → tối ưu hoặc cắt.
-- Chẩn đoán theo phễu: CTR thấp = creative chưa hấp dẫn; CTR ổn nhưng CVR thấp = vấn đề landing/giá/offer; CPA cao so với giá trị đơn = cần siết targeting/bid.
-- Trong 1 campaign, nếu có adset tốt và adset kém → khuyến nghị tái phân bổ ngân sách.
-- Ưu tiên hành động theo mức chi tiêu (tiền lớn xử lý trước).
+- So ROAS với breakEven CỦA TỪNG campaign. Ưu tiên realRoasShopify khi có (nền tảng thường khai cao do view-through).
+- status PAUSED/ARCHIVED = đã tắt → đừng khuyên tạm dừng nữa.
+- Chẩn đoán phễu: CTR thấp = creative; CTR ổn + CVR thấp = landing/giá/offer; FATIGUE = creative mệt mỏi cần mẫu mới.
+- WORSENING → đừng scale, cân nhắc giảm sớm. Tiền lớn xử lý trước.
+- Không bịa số liệu ngoài dữ liệu được cung cấp.
 
-Trả lời bằng tiếng Việt, ngắn gọn, theo cấu trúc:
-1) TỔNG QUAN (2-3 câu: bức tranh chung + ưu tiên số 1).
-2) HÀNH ĐỘNG NGAY (bullet: scale gì, cắt gì, sửa gì — nêu tên campaign/adset + lý do số liệu).
-3) THEO TỪNG NỀN TẢNG (Facebook/Google/Twitter: nhận định + việc cần làm).
-4) GỢI Ý CREATIVE/TEST tiếp theo (2-4 ý).
-Không bịa số liệu ngoài dữ liệu được cung cấp.`;
+TRẢ VỀ DUY NHẤT MỘT JSON HỢP LỆ (không markdown fence, không chữ nào ngoài JSON) theo đúng schema:
+{
+  "summary": "2-4 câu tiếng Việt: bức tranh chung + ưu tiên số 1",
+  "actions": [
+    {
+      "target": "tên campaign/adset",
+      "level": "CAMPAIGN" | "ADSET",
+      "platform": "FACEBOOK" | "GOOGLE" | "TWITTER",
+      "action": "SCALE" | "REDUCE" | "PAUSE" | "KEEP" | "FIX_CREATIVE" | "FIX_LANDING" | "FIX_TRACKING",
+      "detail": "làm gì cụ thể, kèm số liệu",
+      "expectedImpact": "tác động kỳ vọng"
+    }
+  ],
+  "creativeIdeas": ["2-5 ý tưởng creative/test tiếp theo"]
+}
+Tối đa 12 actions, sắp theo ưu tiên giảm dần.`;
+
+/** Parse the model output into AiStrategy (strip fences, validate shape). */
+export function parseAiStrategy(text: string): AiStrategy | null {
+  try {
+    let t = text.trim();
+    const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fence) t = fence[1].trim();
+    // tolerate stray prose around the JSON object
+    const start = t.indexOf("{");
+    const end = t.lastIndexOf("}");
+    if (start === -1 || end <= start) return null;
+    const obj = JSON.parse(t.slice(start, end + 1)) as Record<string, unknown>;
+    if (typeof obj.summary !== "string" || !Array.isArray(obj.actions))
+      return null;
+    const actions: AiAction[] = [];
+    for (const a of obj.actions as Record<string, unknown>[]) {
+      if (!a || typeof a.target !== "string" || typeof a.action !== "string")
+        continue;
+      actions.push({
+        target: a.target,
+        level: a.level === "ADSET" ? "ADSET" : "CAMPAIGN",
+        platform: typeof a.platform === "string" ? a.platform : "",
+        action: a.action as AiAction["action"],
+        detail: typeof a.detail === "string" ? a.detail : "",
+        expectedImpact:
+          typeof a.expectedImpact === "string" ? a.expectedImpact : "",
+      });
+    }
+    return {
+      summary: obj.summary,
+      actions,
+      creativeIdeas: Array.isArray(obj.creativeIdeas)
+        ? (obj.creativeIdeas as unknown[]).filter(
+            (x): x is string => typeof x === "string"
+          )
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
 
 export async function aiOptimize(
   tree: AdTree,
   rules: OptimizeResult,
-  context: { preset: string; storeName?: string | null }
+  context: {
+    preset: string;
+    storeName?: string | null;
+    matchRate?: number;
+    aov?: number;
+  }
 ): Promise<AiOptimizeResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
     return {
@@ -83,11 +196,14 @@ export async function aiOptimize(
   }
 
   const client = new Anthropic();
-  const payload = buildPayload(tree, rules);
+  const payload = buildPayload(tree, rules, {
+    matchRate: context.matchRate,
+    aov: context.aov,
+  });
 
   try {
     const response = await client.messages.create({
-      model: "claude-opus-4-8",
+      model: AI_MODEL,
       max_tokens: 16000,
       // Adaptive thinking is the correct on-mode for Opus 4.8 (budget_tokens 400s);
       // cast because the installed SDK's types predate the "adaptive" variant.
@@ -102,7 +218,7 @@ export async function aiOptimize(
             payload,
             null,
             2
-          )}\n\nHãy đưa ra chiến lược điều chỉnh ads theo cấu trúc đã hướng dẫn.`,
+          )}\n\nTrả về JSON chiến lược theo đúng schema đã nêu.`,
         },
       ],
     });
@@ -113,7 +229,11 @@ export async function aiOptimize(
       .join("\n")
       .trim();
 
-    return { ok: true, text: text || "(AI không trả về nội dung.)" };
+    return {
+      ok: true,
+      text: text || "(AI không trả về nội dung.)",
+      json: parseAiStrategy(text),
+    };
   } catch (e) {
     return {
       ok: false,

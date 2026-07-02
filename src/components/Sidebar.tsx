@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import type { Me } from "@/components/AppShell";
 
@@ -26,6 +27,26 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  // Unread ad-alert badge on "Tối ưu Ads" — re-checked on navigation (cheap
+  // count query) + every 5 min while the app stays open.
+  const [alertCount, setAlertCount] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const load = () =>
+      fetch("/api/ads/alerts?count=1")
+        .then((r) => r.json())
+        .then((d) => {
+          if (active) setAlertCount(d.unreadCount ?? 0);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 5 * 60_000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [pathname]);
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -85,7 +106,12 @@ export function Sidebar({
                 }`}
               >
                 <span className="text-base">{item.icon}</span>
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {item.href === "/ads/optimize" && alertCount > 0 && (
+                  <span className="rounded-full bg-rose-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                    {alertCount > 99 ? "99+" : alertCount}
+                  </span>
+                )}
               </Link>
             );
           })}

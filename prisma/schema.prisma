@@ -41,6 +41,8 @@ model Organization {
   orders      Order[]
   adAccounts  AdAccount[]
   adEntities  AdEntity[]
+  aiReports   AiReport[]
+  adAlerts    AdAlert[]
 }
 
 model Membership {
@@ -345,4 +347,39 @@ model OrderLineItem {
 
   @@index([orderId])
   @@index([productId])
+}
+
+// ---------------------------------------------------------------------------
+// Ads optimization — saved AI strategy reports + rule-based daily alerts.
+// ---------------------------------------------------------------------------
+model AiReport {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+  preset         String // range preset the report was generated for
+  storeId        String? // filters at generation time (display only)
+  platform       String?
+  model          String // AI model id used
+  json           Json? // structured output (summary/actions/creativeIdeas)
+  text           String // raw text (fallback + audit)
+
+  @@index([organizationId, createdAt])
+}
+
+model AdAlert {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+  severity       String // INFO | WARN | CRIT
+  type           String // BURNING | ROAS_DROP | NO_CONV | FATIGUE | TRACKING
+  platform       String?
+  accountId      String?
+  entityName     String // campaign name the alert is about
+  message        String
+  readAt         DateTime?
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, readAt])
 }

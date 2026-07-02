@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { AdTree, CampaignNode, AdsetNode, Trend } from "@/lib/adinsights";
 import type { OptimizeResult, Reco, Action } from "@/lib/optimize";
+import type { AiStrategy } from "@/lib/ai";
 import { ACTION_LABELS } from "@/lib/optimize";
 import { RANGE_PRESET_LABELS, RangePreset } from "@/lib/dates";
 import { AD_PLATFORM_LABELS } from "@/lib/constants";
@@ -41,6 +42,41 @@ interface OptimizeResponse {
 
 const PRESETS: RangePreset[] = ["last7", "thisMonth", "last30", "lastMonth"];
 
+interface AlertRow {
+  id: string;
+  createdAt: string;
+  severity: string; // INFO | WARN | CRIT
+  type: string;
+  platform: string | null;
+  entityName: string;
+  message: string;
+  readAt: string | null;
+}
+
+interface ReportMeta {
+  id: string;
+  createdAt: string;
+  preset: string;
+  storeId: string | null;
+  platform: string | null;
+}
+
+const SEVERITY_TONE: Record<string, "rose" | "amber" | "slate"> = {
+  CRIT: "rose",
+  WARN: "amber",
+  INFO: "slate",
+};
+
+const AI_ACTION_TONE: Record<string, "green" | "blue" | "amber" | "rose" | "slate"> = {
+  SCALE: "green",
+  KEEP: "blue",
+  REDUCE: "amber",
+  PAUSE: "rose",
+  FIX_CREATIVE: "amber",
+  FIX_LANDING: "amber",
+  FIX_TRACKING: "rose",
+};
+
 const ACTION_TONE: Record<Action, "green" | "blue" | "amber" | "rose" | "slate"> = {
   SCALE: "green",
   KEEP: "blue",
@@ -59,14 +95,56 @@ export default function OptimizePage() {
   const [data, setData] = useState<OptimizeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<Set<string>>(new Set());
-  const [ai, setAi] = useState<string | null>(null);
+  const [ai, setAi] = useState<{ text: string; json: AiStrategy | null } | null>(
+    null
+  );
   const [aiLoading, setAiLoading] = useState(false);
+  const [alerts, setAlerts] = useState<AlertRow[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [reports, setReports] = useState<ReportMeta[]>([]);
+  const [reportId, setReportId] = useState("");
 
   useEffect(() => {
     fetch("/api/stores")
       .then((r) => r.json())
       .then((s) => setStores(s.map((x: { id: string; name: string }) => x)));
+    loadAlerts();
+    loadReports();
   }, []);
+
+  function loadAlerts() {
+    fetch("/api/ads/alerts")
+      .then((r) => r.json())
+      .then((d) => {
+        setAlerts(d.alerts ?? []);
+        setUnread(d.unreadCount ?? 0);
+      })
+      .catch(() => {});
+  }
+
+  function loadReports() {
+    fetch("/api/ads/ai-reports")
+      .then((r) => r.json())
+      .then((d) => setReports(d.reports ?? []))
+      .catch(() => {});
+  }
+
+  async function markAllRead() {
+    await fetch("/api/ads/alerts", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ all: true }),
+    }).catch(() => {});
+    loadAlerts();
+  }
+
+  async function openReport(id: string) {
+    setReportId(id);
+    if (!id) return;
+    const r = await fetch(`/api/ads/ai-reports/${id}`).then((x) => x.json());
+    if (r.report)
+      setAi({ text: r.report.text, json: r.report.json as AiStrategy | null });
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -93,15 +171,21 @@ export default function OptimizePage() {
   async function askAi() {
     setAiLoading(true);
     setAi(null);
+    setReportId("");
     try {
       const r = await fetch("/api/ads/optimize/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ preset, storeId, platform }),
       }).then((x) => x.json());
-      setAi(r.ok ? r.text : `⚠ ${r.error}`);
+      setAi(
+        r.ok
+          ? { text: r.text, json: (r.json as AiStrategy | null) ?? null }
+          : { text: `⚠ ${r.error}`, json: null }
+      );
+      if (r.reportId) loadReports();
     } catch (e) {
-      setAi(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+      setAi({ text: `⚠ ${e instanceof Error ? e.message : String(e)}`, json: null });
     } finally {
       setAiLoading(false);
     }
@@ -208,20 +292,136 @@ export default function OptimizePage() {
             )}
           </div>
 
+          {/* Ad alerts (daily cron) */}
+          {alerts.length > 0 && (
+            <Card>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-semibold text-slate-700">
+                  🔔 Cảnh báo Ads{" "}
+                  {unread > 0 && <Badge tone="rose">{unread} chưa đọc</Badge>}
+                </div>
+                {unread > 0 && (
+                  <Button variant="ghost" onClick={markAllRead}>
+                    Đọc tất cả
+                  </Button>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                {alerts.slice(0, 8).map((a) => (
+                  <div
+                    key={a.id}
+                    className={`flex items-start gap-2 rounded-lg px-3 py-2 text-sm ${
+                      a.readAt ? "text-slate-400" : "bg-slate-50 text-slate-600"
+                    }`}
+                  >
+                    <Badge tone={SEVERITY_TONE[a.severity] ?? "slate"}>
+                      {a.severity}
+                    </Badge>
+                    <span className="min-w-0 flex-1">{a.message}</span>
+                    <span className="shrink-0 text-xs text-slate-400">
+                      {new Date(a.createdAt).toLocaleDateString("vi-VN")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
           {/* AI strategy */}
           <Card>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-semibold text-slate-700">
                 Chiến lược AI (Claude)
               </div>
-              <Button onClick={askAi} disabled={aiLoading}>
-                {aiLoading ? "Đang phân tích..." : "🤖 Hỏi AI chiến lược"}
-              </Button>
+              <div className="flex items-center gap-2">
+                {reports.length > 0 && (
+                  <Select
+                    value={reportId}
+                    onChange={(e) => openReport(e.target.value)}
+                    className="!w-auto text-xs"
+                  >
+                    <option value="">Lịch sử báo cáo…</option>
+                    {reports.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {new Date(r.createdAt).toLocaleString("vi-VN")} ·{" "}
+                        {RANGE_PRESET_LABELS[r.preset as RangePreset] ?? r.preset}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+                <Button onClick={askAi} disabled={aiLoading}>
+                  {aiLoading ? "Đang phân tích..." : "🤖 Hỏi AI chiến lược"}
+                </Button>
+              </div>
             </div>
-            {ai && (
-              <pre className="mt-3 whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-sm leading-relaxed text-slate-700">
-                {ai}
-              </pre>
+            {ai?.json ? (
+              <div className="mt-3 space-y-4">
+                <p className="rounded-lg bg-slate-50 p-4 text-sm leading-relaxed text-slate-700">
+                  {ai.json.summary}
+                </p>
+                {ai.json.actions.length > 0 && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs uppercase text-slate-400">
+                          <th className="px-2 py-1.5">Hành động</th>
+                          <th className="px-2 py-1.5">Đối tượng</th>
+                          <th className="px-2 py-1.5">Chi tiết</th>
+                          <th className="px-2 py-1.5">Kỳ vọng</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ai.json.actions.map((a, i) => (
+                          <tr key={i} className="border-t border-slate-100 align-top">
+                            <td className="px-2 py-2">
+                              <Badge tone={AI_ACTION_TONE[a.action] ?? "slate"}>
+                                {a.action}
+                              </Badge>
+                            </td>
+                            <td className="px-2 py-2 font-medium text-slate-700">
+                              {a.target}
+                              <div className="text-[10px] font-normal text-slate-400">
+                                {AD_PLATFORM_LABELS[a.platform] ?? a.platform} ·{" "}
+                                {a.level}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2 text-slate-600">{a.detail}</td>
+                            <td className="px-2 py-2 text-slate-500">
+                              {a.expectedImpact}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {ai.json.creativeIdeas.length > 0 && (
+                  <div>
+                    <div className="mb-1 text-xs font-semibold uppercase text-slate-400">
+                      Gợi ý creative / test
+                    </div>
+                    <ul className="list-disc space-y-0.5 pl-5 text-sm text-slate-600">
+                      {ai.json.creativeIdeas.map((c, i) => (
+                        <li key={i}>{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <details>
+                  <summary className="cursor-pointer text-xs text-slate-400">
+                    Xem nguyên văn AI trả về
+                  </summary>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-xs leading-relaxed text-slate-500">
+                    {ai.text}
+                  </pre>
+                </details>
+              </div>
+            ) : (
+              ai && (
+                <pre className="mt-3 whitespace-pre-wrap rounded-lg bg-slate-50 p-4 text-sm leading-relaxed text-slate-700">
+                  {ai.text}
+                </pre>
+              )
             )}
           </Card>
 

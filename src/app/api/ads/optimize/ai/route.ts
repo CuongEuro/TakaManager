@@ -5,7 +5,7 @@ import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
 import { computeStoreBreakEvens } from "@/lib/pnl";
 import { computeCampaignAttribution } from "@/lib/attribution";
-import { aiOptimize } from "@/lib/ai";
+import { aiOptimize, AI_MODEL } from "@/lib/ai";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -65,7 +65,35 @@ export async function POST(req: NextRequest) {
   const result = await aiOptimize(tree, rules, {
     preset,
     storeName: store?.name ?? null,
+    matchRate: attr.matchRate,
+    aov: bes.aov,
   });
 
-  return NextResponse.json(result);
+  // Keep a history of generated strategies (audit + re-read later).
+  let reportId: string | null = null;
+  if (result.ok && result.text) {
+    try {
+      const saved = await prisma.aiReport.create({
+        data: {
+          organizationId: session.oid,
+          preset,
+          storeId: storeId ?? null,
+          platform: platform ?? null,
+          model: AI_MODEL,
+          // Prisma Json input wants an index signature — AiStrategy is plain
+          // serializable data, so a structural cast is safe here.
+          json: result.json
+            ? (JSON.parse(JSON.stringify(result.json)) as object)
+            : undefined,
+          text: result.text,
+        },
+        select: { id: true },
+      });
+      reportId = saved.id;
+    } catch {
+      /* saving must never break the response (e.g. before db push) */
+    }
+  }
+
+  return NextResponse.json({ ...result, reportId });
 }

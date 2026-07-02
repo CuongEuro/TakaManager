@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { syncAllAdAccounts } from "@/lib/adsync";
 import { syncAllStores, syncStoreRefundsWindow } from "@/lib/sync";
+import { evaluateAdAlerts } from "@/lib/alerts";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // Hobby caps at 60s; light 7-day window keeps it short
@@ -26,6 +27,7 @@ async function handle(req: NextRequest) {
   let adOk = 0;
   let stores = 0;
   let storeOk = 0;
+  let alerts = 0;
   for (const org of orgs) {
     const adResults = await syncAllAdAccounts(org.id, { sinceDays: 7 });
     accounts += adResults.length;
@@ -41,6 +43,14 @@ async function handle(req: NextRequest) {
     for (const r of storeResults) {
       if (r.ok) await syncStoreRefundsWindow(r.storeId, org.id, { sinceDays: 7 });
     }
+
+    // Daily ad alerts (burning / ROAS drop / no-conv / fatigue) on the fresh
+    // data — failures must not break the sync response.
+    try {
+      alerts += await evaluateAdAlerts(org.id);
+    } catch {
+      /* alert evaluation is best-effort */
+    }
   }
   return NextResponse.json({
     ok: true,
@@ -49,6 +59,7 @@ async function handle(req: NextRequest) {
     adSynced: adOk,
     stores,
     storesSynced: storeOk,
+    alerts,
   });
 }
 
