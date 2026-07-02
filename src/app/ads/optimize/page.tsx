@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AdTree, CampaignNode, AdsetNode, Trend } from "@/lib/adinsights";
+import type { AdTree, CampaignNode, AdsetNode, AdNode, Trend } from "@/lib/adinsights";
 import type { OptimizeResult, Reco, Action } from "@/lib/optimize";
 import type { AiStrategy } from "@/lib/ai";
 import { ACTION_LABELS } from "@/lib/optimize";
@@ -113,6 +113,7 @@ export default function OptimizePage() {
   const [data, setData] = useState<OptimizeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<Set<string>>(new Set());
+  const [openAdsets, setOpenAdsets] = useState<Set<string>>(new Set());
   const [ai, setAi] = useState<{ text: string; json: AiStrategy | null } | null>(
     null
   );
@@ -829,6 +830,8 @@ export default function OptimizePage() {
                       <div className="space-y-2">
                         {c.adsets.map((a) => {
                           const ar = recoMap.get(a.id) as Reco | undefined;
+                          const hasAds = (a.ads?.length ?? 0) > 0;
+                          const adsOpen = openAdsets.has(a.id);
                           return (
                             <div
                               key={a.id}
@@ -836,9 +839,27 @@ export default function OptimizePage() {
                             >
                               <div className="flex items-center gap-3">
                                 <span className="flex-1 text-sm font-medium text-slate-700">
+                                  {hasAds && (
+                                    <button
+                                      onClick={() => {
+                                        const n = new Set(openAdsets);
+                                        adsOpen ? n.delete(a.id) : n.add(a.id);
+                                        setOpenAdsets(n);
+                                      }}
+                                      className="mr-1.5 text-slate-400"
+                                    >
+                                      {adsOpen ? "▾" : "▸"}
+                                    </button>
+                                  )}
                                   {a.name}
-                                  {a.status === "PAUSED" && (
-                                    <span className="ml-2 text-xs text-slate-400">(đang tắt)</span>
+                                  {hasAds && (
+                                    <span className="ml-2 text-xs font-normal text-slate-400">
+                                      {a.ads.length} quảng cáo
+                                    </span>
+                                  )}
+                                  {(a.status === "PAUSED" ||
+                                    a.status === "ARCHIVED") && (
+                                    <span className="ml-2 text-xs text-slate-400">(đã tắt)</span>
                                   )}
                                 </span>
                                 <KpiInline k={a} be={ar?.breakEven ?? data.breakEvenRoas} />
@@ -851,6 +872,40 @@ export default function OptimizePage() {
                               {ar && ar.reasons.length > 0 && (
                                 <div className="mt-1.5 text-xs text-slate-500">
                                   {ar.reasons[0]}
+                                </div>
+                              )}
+
+                              {/* AD (creative) tier */}
+                              {hasAds && adsOpen && (
+                                <div className="mt-2 space-y-1.5 border-t border-slate-100 pt-2">
+                                  {a.ads.map((ad) => {
+                                    const dr = recoMap.get(ad.id) as Reco | undefined;
+                                    return (
+                                      <div
+                                        key={ad.id}
+                                        className="flex items-center gap-3 rounded-md bg-slate-50 px-3 py-1.5"
+                                      >
+                                        <span className="flex-1 truncate text-xs text-slate-600">
+                                          {ad.name}
+                                          {(ad.status === "PAUSED" ||
+                                            ad.status === "ARCHIVED") && (
+                                            <span className="ml-2 text-slate-400">
+                                              (đã tắt)
+                                            </span>
+                                          )}
+                                        </span>
+                                        <KpiInline
+                                          k={ad}
+                                          be={dr?.breakEven ?? data.breakEvenRoas}
+                                        />
+                                        {dr && (
+                                          <Badge tone={ACTION_TONE[dr.action]}>
+                                            {ACTION_LABELS[dr.action]}
+                                          </Badge>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               )}
                             </div>
@@ -957,7 +1012,7 @@ function TrendMark({ t }: { t?: Trend | null }) {
   );
 }
 
-function KpiInline({ k, be }: { k: AdsetNode | CampaignNode; be: number }) {
+function KpiInline({ k, be }: { k: AdsetNode | CampaignNode | AdNode; be: number }) {
   return (
     <div className="hidden items-center gap-4 text-xs text-slate-500 md:flex">
       <span>{formatJPY(k.spend)}</span>

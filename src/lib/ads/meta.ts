@@ -6,6 +6,7 @@ import {
   AdAccountCreds,
   AdInsight,
   AdsetInsight,
+  AdCreativeInsight,
   normalizeAdStatus,
   num,
   ymd,
@@ -115,11 +116,11 @@ interface MetaAdsetRow extends MetaRow {
   adset_name?: string;
 }
 
-/** Current effective_status of every campaign or adset in the account (the
+/** Current effective_status of every campaign/adset/ad in the account (the
  *  insights API carries no status). 1–2 extra calls per sync. */
 async function fetchStatusMap(
   creds: AdAccountCreds,
-  edge: "campaigns" | "adsets"
+  edge: "campaigns" | "adsets" | "ads"
 ): Promise<Map<string, string | null>> {
   const acct = creds.externalId.startsWith("act_")
     ? creds.externalId
@@ -193,6 +194,70 @@ export async function fetchMetaAdsets(
         adsetExternalId: r.adset_id ?? "",
         adsetName: r.adset_name ?? "(unknown)",
         status: adsetStatus.get(r.adset_id ?? "") ?? null,
+        date: r.date_start,
+        spend: num(r.spend),
+        impressions: num(r.impressions),
+        clicks: num(r.clicks),
+        conversions: PURCHASE_KEYS.reduce(
+          (s, k) => s + num(r.actions?.find((a) => a.action_type === k)?.value),
+          0
+        ),
+        revenue: purchaseValue(r.action_values),
+      });
+    }
+    url = json.paging?.next ?? null;
+  }
+  return out;
+}
+
+interface MetaAdRow extends MetaRow {
+  adset_id?: string;
+  ad_id?: string;
+  ad_name?: string;
+}
+
+/** Deepest fetch: ad (creative) × day insights, carrying parent ad set id. */
+export async function fetchMetaAds(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date = new Date()
+): Promise<AdCreativeInsight[]> {
+  if (!creds.accessToken) throw new Error("Meta: thiếu access token");
+  const acct = creds.externalId.startsWith("act_")
+    ? creds.externalId
+    : `act_${creds.externalId}`;
+
+  let adStatus = new Map<string, string | null>();
+  try {
+    adStatus = await fetchStatusMap(creds, "ads");
+  } catch {
+    /* keep null statuses */
+  }
+
+  const params = new URLSearchParams({
+    level: "ad",
+    time_increment: "1",
+    fields:
+      "adset_id,ad_id,ad_name,spend,impressions,clicks,actions,action_values",
+    time_range: JSON.stringify({ since: ymd(since), until: ymd(until) }),
+    limit: "500",
+    access_token: creds.accessToken,
+  });
+
+  let url: string | null = `https://graph.facebook.com/${API_VERSION}/${acct}/insights?${params}`;
+  const out: AdCreativeInsight[] = [];
+
+  for (let page = 0; page < 300 && url; page++) {
+    const res: Response = await fetch(url);
+    const json = await res.json();
+    if (!res.ok || json.error)
+      throw new Error(json.error?.message ?? `Meta HTTP ${res.status}`);
+    for (const r of (json.data ?? []) as MetaAdRow[]) {
+      out.push({
+        adsetExternalId: r.adset_id ?? "",
+        adExternalId: r.ad_id ?? "",
+        adName: r.ad_name ?? "(unknown)",
+        status: adStatus.get(r.ad_id ?? "") ?? null,
         date: r.date_start,
         spend: num(r.spend),
         impressions: num(r.impressions),

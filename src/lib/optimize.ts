@@ -27,7 +27,7 @@ export const ACTION_LABELS: Record<Action, string> = {
 };
 
 export interface Reco {
-  level: "CAMPAIGN" | "ADSET";
+  level: "CAMPAIGN" | "ADSET" | "AD";
   id: string;
   name: string;
   campaignName?: string;
@@ -305,6 +305,35 @@ export function optimizeTree(
         trendFlags: a.trend?.flags,
         reasons: ae.reasons,
       });
+
+      // AD/creative tier — per-creative guidance (kill weak creatives, keep
+      // winners). Excluded from the summary counts (see below).
+      for (const ad of a.ads ?? []) {
+        const de =
+          campaignOff || isOff(a.status) || isOff(ad.status)
+            ? {
+                action: "OFF" as Action,
+                priority: 5,
+                reasons: ["Quảng cáo đã tắt hoặc thuộc nhóm/chiến dịch đã tắt."],
+              }
+            : applyTrend(
+                evaluate(ad, be, minSpend, pauseMinSpend, noConvData),
+                ad.trend
+              );
+        recs.push({
+          level: "AD",
+          id: ad.id,
+          name: ad.name,
+          campaignName: c.name,
+          action: de.action,
+          priority: de.priority,
+          roas: ad.roas,
+          spend: ad.spend,
+          breakEven: be,
+          trendFlags: ad.trend?.flags,
+          reasons: de.reasons,
+        });
+      }
     }
   }
 
@@ -317,7 +346,9 @@ export function optimizeTree(
     NO_DATA: 0,
     OFF: 0,
   };
-  for (const r of recs) counts[r.action]++;
+  // Summary counts are about money-level decisions (campaign + ad set); AD-tier
+  // recos are guidance shown inline, not tallied into the top cards/filter.
+  for (const r of recs) if (r.level !== "AD") counts[r.action]++;
 
   // sort: highest priority first, then by spend (biggest money first)
   recs.sort((a, b) => a.priority - b.priority || b.spend - a.spend);

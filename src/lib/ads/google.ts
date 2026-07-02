@@ -8,6 +8,7 @@ import {
   AdAccountCreds,
   AdInsight,
   AdsetInsight,
+  AdCreativeInsight,
   normalizeAdStatus,
   num,
   ymd,
@@ -168,6 +169,65 @@ export async function fetchGoogleAdsets(
         adsetExternalId: r.adGroup?.id ?? "",
         adsetName: r.adGroup?.name ?? "(unknown)",
         status: normalizeAdStatus(r.adGroup?.status),
+        date: r.segments?.date ?? "",
+        spend: num(r.metrics?.costMicros) / 1_000_000,
+        impressions: num(r.metrics?.impressions),
+        clicks: num(r.metrics?.clicks),
+        conversions: num(r.metrics?.conversions),
+        revenue: num(r.metrics?.conversionsValue),
+      });
+    }
+  }
+  return out;
+}
+
+interface GoogleAdResult extends GoogleResult {
+  adGroup?: { id?: string };
+  adGroupAd?: {
+    status?: string;
+    ad?: { id?: string; name?: string; type?: string };
+  };
+}
+
+/** Deepest fetch: ad (ad_group_ad) × day, carrying parent ad group id. Google
+ *  ad names are often blank (responsive ads) → fall back to type + id. */
+export async function fetchGoogleAds(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date = new Date()
+): Promise<AdCreativeInsight[]> {
+  const token = await getAccessToken(creds);
+  const cid = customerId(creds);
+  const query = `
+    SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.name,
+           ad_group_ad.ad.type, ad_group_ad.status, segments.date,
+           metrics.cost_micros, metrics.impressions, metrics.clicks,
+           metrics.conversions, metrics.conversions_value
+    FROM ad_group_ad
+    WHERE segments.date BETWEEN '${ymd(since)}' AND '${ymd(until)}'`;
+
+  const res = await fetch(
+    `https://googleads.googleapis.com/${API_VERSION}/customers/${cid}/googleAds:searchStream`,
+    { method: "POST", headers: headers(creds, token), body: JSON.stringify({ query }) }
+  );
+  const text = await res.text();
+  if (!res.ok)
+    throw new Error(`Google Ads HTTP ${res.status}: ${text.slice(0, 200)}`);
+
+  const chunks = JSON.parse(text) as { results?: GoogleAdResult[] }[];
+  const out: AdCreativeInsight[] = [];
+  for (const chunk of chunks) {
+    for (const r of chunk.results ?? []) {
+      const ad = r.adGroupAd?.ad;
+      const name =
+        ad?.name && ad.name.trim()
+          ? ad.name
+          : `${ad?.type ?? "Ad"} ${ad?.id ?? ""}`.trim();
+      out.push({
+        adsetExternalId: r.adGroup?.id ?? "",
+        adExternalId: ad?.id ?? "",
+        adName: name,
+        status: normalizeAdStatus(r.adGroupAd?.status),
         date: r.segments?.date ?? "",
         spend: num(r.metrics?.costMicros) / 1_000_000,
         impressions: num(r.metrics?.impressions),

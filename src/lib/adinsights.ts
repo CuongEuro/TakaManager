@@ -28,6 +28,15 @@ export interface Trend {
   flags: ("WORSENING" | "IMPROVING" | "FATIGUE" | "NEW")[];
 }
 
+export interface AdNode extends Kpis {
+  id: string;
+  externalId: string;
+  name: string;
+  status: string | null;
+  platform: string;
+  trend?: Trend | null;
+}
+
 export interface AdsetNode extends Kpis {
   id: string;
   externalId: string;
@@ -35,6 +44,7 @@ export interface AdsetNode extends Kpis {
   status: string | null;
   platform: string;
   trend?: Trend | null;
+  ads: AdNode[]; // AD/creative tier (may be empty if not synced deep)
 }
 
 export interface CampaignNode extends Kpis {
@@ -207,6 +217,8 @@ export async function getAdTree(
 
   // per-campaign half-window accumulators (for campaign-level trend)
   const campHalves = new Map<string, { cur: Raw; prev: Raw }>();
+  // adset lookup `${accountId}|${externalId}` → node, for attaching ads
+  const adsetByKey = new Map<string, AdsetNode>();
 
   for (const e of entities) {
     if (e.level !== "ADSET") continue;
@@ -232,6 +244,7 @@ export async function getAdTree(
       platform: e.platform,
       ...deriveKpis(m),
       trend: trendOn ? computeTrend(cur, prev) : null,
+      ads: [],
     };
 
     const campKey = `${e.accountId}|${e.parentExternalId}`;
@@ -246,6 +259,7 @@ export async function getAdTree(
       dataLevel: "adset",
     });
     camp.adsets.push(adset);
+    adsetByKey.set(`${e.accountId}|${e.externalId}`, adset);
     let halves = campHalves.get(campKey);
     if (!halves) {
       halves = { cur: zero(), prev: zero() };
@@ -254,6 +268,39 @@ export async function getAdTree(
     addRaw(halves.cur, cur);
     addRaw(halves.prev, prev);
   }
+
+  // AD (creative) tier — attach each ad to its parent ad set (by externalId).
+  for (const e of entities) {
+    if (e.level !== "AD") continue;
+    const parent = adsetByKey.get(`${e.accountId}|${e.parentExternalId}`);
+    if (!parent) continue; // orphan (parent adset not in range) — skip
+    const m = zero();
+    const cur = zero();
+    const prev = zero();
+    for (const x of e.metrics) {
+      const raw = {
+        spend: x.spend,
+        impressions: x.impressions,
+        clicks: x.clicks,
+        conversions: x.conversions,
+        revenue: x.revenue,
+      };
+      addRaw(m, raw);
+      addRaw(x.date < mid ? prev : cur, raw);
+    }
+    if (m.spend === 0 && m.impressions === 0) continue; // no activity in range
+    parent.ads.push({
+      id: e.id,
+      externalId: e.externalId,
+      name: e.name,
+      status: e.status,
+      platform: e.platform,
+      ...deriveKpis(m),
+      trend: trendOn ? computeTrend(cur, prev) : null,
+    });
+  }
+  for (const adset of adsetByKey.values())
+    adset.ads.sort((a, b) => b.spend - a.spend);
 
   // Campaigns with spend but NO adset metrics in range (deep sync not run for
   // that window / platform hiccup): fall back to their AdSpend campaign-day

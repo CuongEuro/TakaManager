@@ -7,11 +7,27 @@ import {
   AdAccountCreds,
   AdInsight,
   AdsetInsight,
+  AdCreativeInsight,
   adSpendDedupeKey,
 } from "@/lib/ads/types";
-import { fetchMetaInsights, fetchMetaAdsets, testMeta } from "@/lib/ads/meta";
-import { fetchGoogleInsights, fetchGoogleAdsets, testGoogle } from "@/lib/ads/google";
-import { fetchTwitterInsights, fetchTwitterAdsets, testTwitter } from "@/lib/ads/twitter";
+import {
+  fetchMetaInsights,
+  fetchMetaAdsets,
+  fetchMetaAds,
+  testMeta,
+} from "@/lib/ads/meta";
+import {
+  fetchGoogleInsights,
+  fetchGoogleAdsets,
+  fetchGoogleAds,
+  testGoogle,
+} from "@/lib/ads/google";
+import {
+  fetchTwitterInsights,
+  fetchTwitterAdsets,
+  fetchTwitterAds,
+  testTwitter,
+} from "@/lib/ads/twitter";
 
 type AdAccountRow = {
   id: string;
@@ -82,6 +98,23 @@ function fetchAdsets(
   }
 }
 
+function fetchAdCreatives(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date
+): Promise<AdCreativeInsight[]> {
+  switch (creds.platform) {
+    case "FACEBOOK":
+      return fetchMetaAds(creds, since, until);
+    case "GOOGLE":
+      return fetchGoogleAds(creds, since, until);
+    case "TWITTER":
+      return fetchTwitterAds(creds, since, until);
+    default:
+      return Promise.resolve([]);
+  }
+}
+
 /** Upsert campaign+adset entities and their daily metrics. Returns adset count.
  *  taxMultiplier: platform spend is pre-tax; store it tax-inclusive so the
  *  optimize tree's ROAS matches AdSpend / the P&L. */
@@ -93,7 +126,8 @@ async function syncHierarchy(
     platform: string;
   },
   rows: AdsetInsight[],
-  taxMultiplier: number
+  taxMultiplier: number,
+  adRows: AdCreativeInsight[] = []
 ): Promise<number> {
   // 1) upsert campaign + adset entities
   const campaigns = new Map<string, { name: string; status: string | null }>();
@@ -183,6 +217,75 @@ async function syncHierarchy(
       update: metric,
     });
   }
+
+  // 3) AD (creative) tier — entities parented to their ad set + daily metrics.
+  if (adRows.length > 0) {
+    const ads = new Map<
+      string,
+      { name: string; parent: string; status: string | null }
+    >();
+    for (const r of adRows)
+      if (r.adExternalId)
+        ads.set(r.adExternalId, {
+          name: r.adName,
+          parent: r.adsetExternalId,
+          status: r.status,
+        });
+
+    const adIdMap = new Map<string, string>();
+    for (const [externalId, a] of ads) {
+      const e = await prisma.adEntity.upsert({
+        where: { accountId_externalId: { accountId: account.id, externalId } },
+        create: {
+          organizationId: account.organizationId,
+          accountId: account.id,
+          storeId: account.storeId,
+          platform: account.platform,
+          level: "AD",
+          externalId,
+          name: a.name,
+          parentExternalId: a.parent,
+          status: a.status,
+        },
+        update: { name: a.name, parentExternalId: a.parent, status: a.status },
+      });
+      adIdMap.set(externalId, e.id);
+    }
+
+    const adByKey = new Map<string, AdCreativeInsight>();
+    for (const r of adRows) {
+      if (!r.adExternalId) continue;
+      const key = `${r.adExternalId}|${r.date}`;
+      const cur = adByKey.get(key);
+      if (cur) {
+        cur.spend += r.spend;
+        cur.impressions += r.impressions;
+        cur.clicks += r.clicks;
+        cur.conversions += r.conversions;
+        cur.revenue += r.revenue;
+      } else {
+        adByKey.set(key, { ...r });
+      }
+    }
+    for (const r of adByKey.values()) {
+      const entityId = adIdMap.get(r.adExternalId);
+      if (!entityId) continue;
+      const date = new Date(`${r.date}T00:00:00`);
+      const metric = {
+        spend: r.spend * taxMultiplier,
+        impressions: r.impressions,
+        clicks: r.clicks,
+        conversions: r.conversions,
+        revenue: r.revenue,
+      };
+      await prisma.adMetric.upsert({
+        where: { entityId_date: { entityId, date } },
+        create: { entityId, date, ...metric },
+        update: metric,
+      });
+    }
+  }
+
   return adsets.size;
 }
 
@@ -225,6 +328,7 @@ export async function syncAdAccount(
     since?: string | Date; // explicit window start (chunked / custom range)
     until?: string | Date; // explicit window end (defaults to today)
     deep?: boolean; // also pull ad set-level detail (heavy). Default true.
+    ads?: boolean; // also pull AD/creative-level detail (heaviest). Default true when deep.
   } = {}
 ): Promise<AdSyncResult> {
   const a = await prisma.adAccount.findUnique({ where: { id: accountId } });
@@ -262,6 +366,16 @@ export async function syncAdAccount(
     let adsets = 0;
     if (opts.deep !== false) {
       const adsetRows = await withRetry(() => fetchAdsets(creds, since, until));
+      // AD/creative tier is the heaviest — best-effort so a failure there never
+      // loses the ad set sync. Skip with ads:false. Default on when deep.
+      let adRows: AdCreativeInsight[] = [];
+      if (opts.ads !== false) {
+        try {
+          adRows = await withRetry(() => fetchAdCreatives(creds, since, until));
+        } catch {
+          adRows = [];
+        }
+      }
       adsets = await syncHierarchy(
         {
           id: a.id,
@@ -270,7 +384,8 @@ export async function syncAdAccount(
           platform: a.platform,
         },
         adsetRows,
-        taxMultiplier
+        taxMultiplier,
+        adRows
       );
     }
 

@@ -9,6 +9,7 @@ import {
   AdAccountCreds,
   AdInsight,
   AdsetInsight,
+  AdCreativeInsight,
   normalizeAdStatus,
   num,
   ymd,
@@ -322,6 +323,104 @@ export async function fetchTwitterAdsets(
           adsetExternalId: li.id,
           adsetName: li.name,
           status: normalizeAdStatus(li.status),
+          date: ymd(day),
+          spend,
+          impressions,
+          clicks,
+          conversions,
+          revenue,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+interface PromotedTweet {
+  id: string; // promoted_tweet id (stats entity)
+  lineItemId: string;
+  tweetId: string;
+}
+
+async function fetchPromotedTweets(creds: AdAccountCreds): Promise<PromotedTweet[]> {
+  const out: PromotedTweet[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 50; i++) {
+    const q: Record<string, string> = { count: "200" };
+    if (cursor) q.cursor = cursor;
+    const json = await signedGet(
+      creds,
+      `/accounts/${creds.externalId}/promoted_tweets`,
+      q
+    );
+    for (const p of json.data ?? [])
+      out.push({
+        id: p.id,
+        lineItemId: p.line_item_id ?? "",
+        tweetId: String(p.tweet_id ?? ""),
+      });
+    cursor = json.next_cursor;
+    if (!cursor) break;
+  }
+  return out;
+}
+
+/** Deepest fetch: promoted tweet (≈ad) × day, carrying parent line item id.
+ *  X promoted tweets have no friendly name → labelled by tweet id. */
+export async function fetchTwitterAds(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date = new Date()
+): Promise<AdCreativeInsight[]> {
+  const promoted = await fetchPromotedTweets(creds);
+  if (promoted.length === 0) return [];
+
+  const start = new Date(since);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(until);
+  end.setHours(0, 0, 0, 0);
+  const dayCount = Math.max(
+    1,
+    Math.round((end.getTime() - start.getTime()) / 86400000)
+  );
+  const byId = new Map(promoted.map((p) => [p.id, p]));
+  const out: AdCreativeInsight[] = [];
+
+  for (let i = 0; i < promoted.length; i += 20) {
+    const batch = promoted.slice(i, i + 20);
+    const json = await signedGet(creds, `/stats/accounts/${creds.externalId}`, {
+      entity: "PROMOTED_TWEET",
+      entity_ids: batch.map((p) => p.id).join(","),
+      metric_groups: "BILLING,ENGAGEMENT,WEB_CONVERSION",
+      granularity: "DAY",
+      placement: "ALL_ON_TWITTER",
+      start_time: `${ymd(start)}T00:00:00Z`,
+      end_time: `${ymd(end)}T00:00:00Z`,
+    });
+
+    for (const row of json.data ?? []) {
+      const pt = byId.get(row.id);
+      if (!pt) continue;
+      const m = row.id_data?.[0]?.metrics ?? {};
+      const spendArr: (number | null)[] = m.billed_charge_local_micro ?? [];
+      const imprArr: (number | null)[] = m.impressions ?? [];
+      const clickArr: (number | null)[] = m.clicks ?? [];
+      const purchases: ConvMetric = m.conversion_purchases;
+      for (let d = 0; d < dayCount; d++) {
+        const day = new Date(start);
+        day.setDate(start.getDate() + d);
+        const spend = num(spendArr[d]) / 1_000_000;
+        const impressions = num(imprArr[d]);
+        const clicks = num(clickArr[d]);
+        const conversions = convCount(purchases, d);
+        const revenue = convSale(purchases, d);
+        if (spend === 0 && impressions === 0 && clicks === 0 && conversions === 0)
+          continue;
+        out.push({
+          adsetExternalId: pt.lineItemId,
+          adExternalId: pt.id,
+          adName: pt.tweetId ? `Tweet ${pt.tweetId}` : pt.id,
+          status: null,
           date: ymd(day),
           spend,
           impressions,

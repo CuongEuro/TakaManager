@@ -28,6 +28,21 @@ export interface AdsetInsight {
   revenue: number;
 }
 
+// One AD/creative (Meta ad / Google ad_group_ad / X promoted tweet) × one day,
+// carrying its parent ad set — the 3rd (deepest) hierarchy tier.
+export interface AdCreativeInsight {
+  adsetExternalId: string;
+  adExternalId: string;
+  adName: string;
+  status: string | null;
+  date: string; // YYYY-MM-DD
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+}
+
 /** Map each platform's status vocabulary onto ACTIVE | PAUSED | ARCHIVED so
  *  the optimizer never suggests pausing something that's already off.
  *  Meta: ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED/ARCHIVED/DELETED...
