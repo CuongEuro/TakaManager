@@ -628,6 +628,66 @@ export default function StoresPage() {
     }
   }
 
+  // Refresh "Cost per item" only (for stores using COST_PER_ITEM) — patches
+  // line-item unit costs without re-pulling whole orders.
+  async function refreshCosts() {
+    const targets = items.filter(
+      (s) => (s.hasToken || s.hasClientCreds) && s.cogsSource === "COST_PER_ITEM"
+    );
+    if (targets.length === 0) {
+      setMsg({
+        id: "ALL",
+        ok: false,
+        text: "✗ Chưa store nào chọn 'Nguồn COGS = Cost per item'.",
+      });
+      return;
+    }
+    setBusy("COSTS");
+    setMsg(null);
+    setProgress({ percent: 1, message: "Cập nhật giá vốn…" });
+    try {
+      const { from, to } = range;
+      let updated = 0;
+      const n = targets.length;
+      for (let i = 0; i < n; i++) {
+        const s = targets[i];
+        setProgress({
+          percent: Math.round((i * 100) / n),
+          message: `[${i + 1}/${n}] ${s.name}: đang lấy giá vốn…`,
+        });
+        try {
+          const r = await fetch("/api/shopify/costs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              storeId: s.id,
+              since: from.toISOString(),
+              until: to.toISOString(),
+            }),
+          }).then((x) => x.json());
+          if (r.ok) updated += r.updated ?? 0;
+          else setMsg({ id: "ALL", ok: false, text: `⚠️ ${s.name}: ${r.error}` });
+        } catch (e) {
+          setMsg({
+            id: "ALL",
+            ok: false,
+            text: `⚠️ ${s.name}: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
+      }
+      setProgress({ percent: 100, message: "Hoàn tất" });
+      setMsg({
+        id: "ALL",
+        ok: true,
+        text: `✓ Đã cập nhật giá vốn cho ${updated} dòng đơn (${rangeLabel()}).`,
+      });
+      await load();
+    } finally {
+      setBusy(null);
+      setProgress(null);
+    }
+  }
+
   async function enableWebhooks(id: string) {
     setBusy(id);
     setMsg(null);
@@ -718,6 +778,9 @@ export default function StoresPage() {
             </Link>
             <Button variant="secondary" onClick={refreshReturns} disabled={!!busy}>
               {busy === "RETURNS" ? "Đang cập nhật..." : "↩️ Cập nhật hoàn hàng"}
+            </Button>
+            <Button variant="secondary" onClick={refreshCosts} disabled={!!busy}>
+              {busy === "COSTS" ? "Đang cập nhật..." : "💰 Cập nhật giá vốn"}
             </Button>
             <Button onClick={syncAll} disabled={!!busy}>
               {busy === "ALL" ? "Đang đồng bộ..." : "🔄 Đồng bộ tất cả"}

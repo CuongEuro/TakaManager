@@ -386,6 +386,43 @@ export async function fetchProductImages(
   return out;
 }
 
+const PRODUCT_COSTS_QUERY = `
+query ProductCosts($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product {
+      id
+      variants(first: 1) { nodes { inventoryItem { unitCost { amount } } } }
+    }
+  }
+}`;
+
+/** Fetch each product's "Cost per item" (first variant's inventoryItem.unitCost),
+ *  batched by 100. Requires the read_inventory scope. */
+export async function fetchProductCosts(
+  creds: ShopifyCreds,
+  productGids: string[]
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (productGids.length === 0) return out;
+  const c = await resolveCreds(creds);
+  for (let i = 0; i < productGids.length; i += 100) {
+    const ids = productGids.slice(i, i + 100);
+    const data = await shopifyGraphQL<{
+      nodes: ({
+        id: string;
+        variants: {
+          nodes: { inventoryItem: { unitCost: { amount: string } | null } | null }[];
+        };
+      } | null)[];
+    }>(c, PRODUCT_COSTS_QUERY, { ids });
+    for (const n of data.nodes) {
+      const cost = num(n?.variants?.nodes?.[0]?.inventoryItem?.unitCost?.amount);
+      if (n?.id && cost > 0) out.set(n.id, cost);
+    }
+  }
+  return out;
+}
+
 /** Total number of orders in the window — best-effort, for an accurate progress
  *  bar. Returns null if the API/version doesn't support ordersCount. */
 /** Shopify search query for an order window. `until` (optional) bounds the end

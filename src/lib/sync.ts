@@ -16,6 +16,7 @@ import {
   fetchOrdersSince,
   fetchProductImages,
   fetchRefundsPage,
+  fetchProductCosts,
   ShopifyCreds,
   ShopifyOrderNorm,
 } from "@/lib/shopify";
@@ -356,6 +357,81 @@ export async function syncStoreRefundsPage(
     };
   } catch (e) {
     return { ...base, ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// --- cost-only sync (patch line-item unit costs, no order re-pull) ----------
+
+export interface CostSyncResult {
+  ok: boolean;
+  storeId: string;
+  storeName: string;
+  products: number; // products whose cost was fetched
+  updated: number; // line items patched
+  error?: string;
+}
+
+/** Refresh "Cost per item" for a store: fetch each product's current cost from
+ *  Shopify and patch OrderLineItem.unitCost for that store's orders in the
+ *  window. Cheap vs a full order re-sync (products « orders). */
+export async function syncStoreCosts(
+  storeId: string,
+  organizationId: string,
+  opts: { since?: Date; until?: Date; sinceDays?: number } = {}
+): Promise<CostSyncResult> {
+  const { store, creds } = await storeCreds(storeId, organizationId);
+  const base = { storeId, storeName: store?.name ?? storeId, products: 0, updated: 0 };
+  if (!creds)
+    return { ...base, ok: false, error: "Thiếu Shopify domain hoặc khoá kết nối." };
+
+  const since = resolveSince(opts, store!.lastSyncedAt);
+  const winStart = new Date(since);
+  winStart.setHours(0, 0, 0, 0);
+  const winEnd = opts.until ? new Date(opts.until) : new Date();
+  winEnd.setHours(23, 59, 59, 999);
+
+  try {
+    // Distinct products that appear in this store's orders in the window.
+    const grouped = await prisma.orderLineItem.groupBy({
+      by: ["productId"],
+      where: {
+        productId: { not: null },
+        order: { storeId, date: { gte: winStart, lte: winEnd } },
+      },
+    });
+    const pids = grouped.map((g) => g.productId).filter((x): x is string => !!x);
+    if (pids.length === 0) return { ...base, ok: true };
+
+    const products = await prisma.product.findMany({
+      where: { id: { in: pids }, externalId: { not: null } },
+      select: { id: true, externalId: true },
+    });
+    const costMap = await fetchProductCosts(
+      creds,
+      products.map((p) => p.externalId!).filter(Boolean)
+    );
+
+    let updated = 0;
+    for (const p of products) {
+      const cost = p.externalId ? costMap.get(p.externalId) : undefined;
+      if (cost == null || cost <= 0) continue;
+      const res = await prisma.orderLineItem.updateMany({
+        where: { productId: p.id, order: { storeId, date: { gte: winStart, lte: winEnd } } },
+        data: { unitCost: cost },
+      });
+      updated += res.count;
+    }
+    return { ...base, ok: true, products: products.length, updated };
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    if (/inventory|unitCost|InventoryItem/i.test(m))
+      return {
+        ...base,
+        ok: false,
+        error:
+          "Cần cấp scope 'read_inventory' cho app + cài lại app lên store để lấy Cost per item.",
+      };
+    return { ...base, ok: false, error: m };
   }
 }
 
