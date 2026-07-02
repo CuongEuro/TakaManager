@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import type { DashboardData } from "@/lib/pnl";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
@@ -112,6 +113,10 @@ export default function DashboardPage() {
   const collectedBase = s?.revenue.totalCollected ?? 0;
   const pctOfCollected = (v: number) =>
     collectedBase > 0 ? `${((v / collectedBase) * 100).toFixed(1)}%` : "—";
+  // Deep link to the full best-seller list, carrying the current range + store.
+  const productsHref = `/products?from=${dayStr(range.from)}&to=${dayStr(
+    range.to
+  )}${storeId ? `&storeId=${storeId}` : ""}`;
 
   return (
     <div>
@@ -402,17 +407,26 @@ export default function DashboardPage() {
             </Card>
 
             <Card>
-              <div className="mb-3 text-sm font-semibold text-slate-700">
-                Top sản phẩm bán chạy
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-700">
+                  Top sản phẩm bán chạy
+                </span>
+                <Link
+                  href={productsHref}
+                  className="text-xs font-medium text-brand-600 hover:text-brand-700"
+                >
+                  Xem tất cả →
+                </Link>
               </div>
               {data && data.bestSellers.length === 0 ? (
                 <EmptyState message="Chưa có dữ liệu đơn hàng." />
               ) : (
                 <div className="space-y-2">
                   {data?.bestSellers.map((p, i) => (
-                    <div
+                    <Link
                       key={p.productId ?? p.title}
-                      className="flex items-center gap-3"
+                      href={productsHref}
+                      className="-mx-2 flex items-center gap-3 rounded-lg px-2 py-1 transition hover:bg-slate-50"
                     >
                       <span className="w-5 text-center text-xs font-bold text-slate-400">
                         {i + 1}
@@ -434,7 +448,7 @@ export default function DashboardPage() {
                       <div className="text-sm font-semibold text-slate-700">
                         {formatJPY(p.revenue)}
                       </div>
-                    </div>
+                    </Link>
                   ))}
                 </div>
               )}

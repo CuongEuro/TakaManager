@@ -7,6 +7,7 @@ import type { Me } from "@/components/AppShell";
 const NAV = [
   { href: "/", label: "Dashboard", icon: "📊" },
   { href: "/stores", label: "Stores", icon: "🏬" },
+  { href: "/products", label: "Sản phẩm", icon: "📦" },
   { href: "/costs/fixed", label: "Chi phí cố định", icon: "🏛️" },
   { href: "/costs/variable-a", label: "Biến đổi A (Sản xuất)", icon: "🏭" },
   { href: "/costs/ads", label: "Biến đổi B (Quảng cáo)", icon: "📣" },
