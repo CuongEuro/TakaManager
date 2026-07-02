@@ -316,6 +316,31 @@ export async function computeDashboard(
     }),
   ]);
 
+  // When filtering to one store, `orders` only holds that store's orders — so
+  // fetch a light company-wide list to compute the shared-fixed-cost revenue
+  // share (used by BOTH the P&L and the store breakdown, so they agree).
+  const allOrdersForShare = storeId
+    ? await prisma.order.findMany({
+        where: { organizationId, date: { gte: start, lt: end } },
+        select: {
+          grossRevenue: true,
+          discounts: true,
+          shippingCharged: true,
+          refunded: true,
+          store: { select: { taxRate: true } },
+        },
+      })
+    : null;
+  const companyRevenue = allOrdersForShare
+    ? allOrdersForShare.reduce(
+        (s, o) =>
+          s +
+          (o.grossRevenue - o.discounts + o.shippingCharged - o.refunded) *
+            (1 - (o.store?.taxRate ?? 0)),
+        0
+      )
+    : null;
+
   const summary = buildPnl({
     start,
     end,
@@ -325,18 +350,7 @@ export async function computeDashboard(
     rules,
     adSpends,
     fixedCosts,
-    allOrdersForShare: storeId
-      ? await prisma.order.findMany({
-          where: { organizationId, date: { gte: start, lt: end } },
-          select: {
-            grossRevenue: true,
-            discounts: true,
-            shippingCharged: true,
-            refunded: true,
-            store: { select: { taxRate: true } },
-          },
-        })
-      : null,
+    allOrdersForShare,
   });
 
   const daily = buildDailySeries(start, end, orders, adSpends, rules, fixedCosts, storeId ?? null, summary.fixed.total, tz);
@@ -348,7 +362,8 @@ export async function computeDashboard(
     fixedCosts,
     start,
     end,
-    tz
+    tz,
+    companyRevenue
   );
   const bestSellers = buildBestSellers(orders);
   const channels = buildChannelBreakdown(orders);
@@ -644,10 +659,15 @@ function buildStoreBreakdown(
   fixedCosts: FixedCostRow[],
   start: Date,
   end: Date,
-  tz: string
+  tz: string,
+  companyRevenue: number | null = null
 ): StoreRow[] {
   // Company-wide revenue (ex-tax) → to split shared fixed costs by store share.
-  const totalRevAll = orders.reduce((acc, o) => acc + orderRevenue(o), 0);
+  // When the dashboard is filtered to ONE store, `orders` only holds that
+  // store's orders — use the company-wide figure passed in, otherwise the
+  // single store would absorb 100% of shared fixed costs.
+  const totalRevAll =
+    companyRevenue ?? orders.reduce((acc, o) => acc + orderRevenue(o), 0);
   const rows: StoreRow[] = [];
   for (const s of stores) {
     const sOrders = orders.filter((o) => o.storeId === s.id);
