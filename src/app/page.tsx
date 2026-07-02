@@ -51,53 +51,59 @@ export default function DashboardPage() {
     return r.json();
   }, [range, storeId]);
 
+  // Load dashboard data whenever range/store changes (no ad refresh here).
   useEffect(() => {
     let active = true;
     setLoading(true);
-    (async () => {
-      const d = await loadDashboard();
-      if (!active) return;
-      setData(d);
-      setLoading(false);
-      // Ad spend isn't realtime like orders — when the window includes today,
-      // pull a fresh light snapshot (throttled server-side) and reload silently.
-      if (dayStr(range.to) === dayStr(new Date())) {
-        setRefreshingAds(true);
-        try {
-          const rr = await fetch("/api/ads/refresh", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: "{}",
-          }).then((x) => x.json());
-          if (active && rr.ok > 0) {
-            const d2 = await loadDashboard();
-            if (active) setData(d2);
-          }
-        } catch {
-          /* ignore — dashboard still shows last-synced spend */
-        } finally {
-          if (active) setRefreshingAds(false);
-        }
-      }
-    })();
+    loadDashboard()
+      .then((d) => active && setData(d))
+      .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
-  }, [loadDashboard, range]);
+  }, [loadDashboard]);
 
-  async function refreshAdsNow() {
-    setRefreshingAds(true);
-    try {
-      await fetch("/api/ads/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: true }),
-      });
-      setData(await loadDashboard());
-    } finally {
-      setRefreshingAds(false);
-    }
-  }
+  // Refresh ad spend (server-throttled), then silently reload the dashboard.
+  // force=true bypasses the server throttle (manual button).
+  const doAdsRefresh = useCallback(
+    async (force: boolean) => {
+      setRefreshingAds(true);
+      try {
+        const r = await fetch("/api/ads/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(force ? { force: true } : {}),
+        }).then((x) => x.json());
+        try {
+          localStorage.setItem("taka:ads-last-refresh", String(Date.now()));
+        } catch {
+          /* ignore quota */
+        }
+        if (force || (r.ok ?? 0) > 0) setData(await loadDashboard());
+      } catch {
+        /* ignore — dashboard still shows last-synced spend */
+      } finally {
+        setRefreshingAds(false);
+      }
+    },
+    [loadDashboard]
+  );
+
+  // Auto-refresh ads at most ONCE PER HOUR (only when viewing a window that
+  // includes today). Checks on open and every 5 min while the tab stays open.
+  useEffect(() => {
+    const HOUR = 3600_000;
+    const check = () => {
+      if (dayStr(range.to) !== dayStr(new Date())) return; // only for "today"
+      const last = Number(localStorage.getItem("taka:ads-last-refresh") || 0);
+      if (Date.now() - last >= HOUR) doAdsRefresh(false);
+    };
+    check();
+    const id = setInterval(check, 5 * 60_000);
+    return () => clearInterval(id);
+  }, [doAdsRefresh, range]);
+
+  const refreshAdsNow = () => doAdsRefresh(true);
 
   const s = data?.summary;
   const netTone = s && s.profit.netProfit >= 0 ? "good" : "bad";
@@ -120,7 +126,7 @@ export default function DashboardPage() {
             <button
               onClick={refreshAdsNow}
               disabled={refreshingAds}
-              title="Kéo lại chi phí Ads hôm nay ngay bây giờ"
+              title="Tự cập nhật tối đa 1 lần/giờ. Bấm để kéo lại chi phí Ads hôm nay ngay bây giờ."
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
               {refreshingAds ? "Đang cập nhật Ads…" : "🔄 Cập nhật Ads"}

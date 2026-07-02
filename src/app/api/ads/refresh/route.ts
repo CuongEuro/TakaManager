@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const body = await req.json().catch(() => ({} as Record<string, unknown>));
-  const staleMinutes = body.staleMinutes != null ? Number(body.staleMinutes) : 10;
+  const staleMinutes = body.staleMinutes != null ? Number(body.staleMinutes) : 60;
   const force = !!body.force;
   const cutoff = Date.now() - staleMinutes * 60000;
 
