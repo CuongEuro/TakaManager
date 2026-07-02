@@ -76,7 +76,7 @@ export async function testGoogle(creds: AdAccountCreds): Promise<string> {
 
 interface GoogleResult {
   segments?: { date?: string };
-  campaign?: { id?: string; name?: string };
+  campaign?: { id?: string; name?: string; status?: string };
   metrics?: {
     costMicros?: string;
     impressions?: string;
@@ -94,9 +94,9 @@ export async function fetchGoogleInsights(
   const token = await getAccessToken(creds);
   const cid = customerId(creds);
   const query = `
-    SELECT segments.date, campaign.id, campaign.name, metrics.cost_micros,
-           metrics.impressions, metrics.clicks, metrics.conversions,
-           metrics.conversions_value
+    SELECT segments.date, campaign.id, campaign.name, campaign.status,
+           metrics.cost_micros, metrics.impressions, metrics.clicks,
+           metrics.conversions, metrics.conversions_value
     FROM campaign
     WHERE segments.date BETWEEN '${ymd(since)}' AND '${ymd(until)}'`;
 
@@ -116,6 +116,7 @@ export async function fetchGoogleInsights(
         date: r.segments?.date ?? "",
         campaignExternalId: r.campaign?.id ?? null,
         campaignName: r.campaign?.name ?? null,
+        campaignStatus: normalizeAdStatus(r.campaign?.status),
         spend: num(r.metrics?.costMicros) / 1_000_000,
         impressions: num(r.metrics?.impressions),
         clicks: num(r.metrics?.clicks),

@@ -3,6 +3,7 @@ export interface AdInsight {
   date: string; // YYYY-MM-DD
   campaignExternalId: string | null; // for campaign→store attribution
   campaignName: string | null;
+  campaignStatus: string | null; // normalized ACTIVE|PAUSED|ARCHIVED (for filters)
   spend: number;
   impressions: number;
   clicks: number;

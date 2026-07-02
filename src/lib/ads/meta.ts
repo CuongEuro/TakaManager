@@ -69,6 +69,15 @@ export async function fetchMetaInsights(
     access_token: creds.accessToken,
   });
 
+  // Current campaign statuses (best-effort — the insights API has none). One
+  // extra light call so the Active/Inactive filter works after a normal sync.
+  let campaignStatus = new Map<string, string | null>();
+  try {
+    campaignStatus = await fetchStatusMap(creds, "campaigns");
+  } catch {
+    /* keep null statuses */
+  }
+
   let url: string | null = `https://graph.facebook.com/${API_VERSION}/${acct}/insights?${params}`;
   const out: AdInsight[] = [];
 
@@ -83,6 +92,7 @@ export async function fetchMetaInsights(
         date: r.date_start,
         campaignExternalId: r.campaign_id ?? null,
         campaignName: r.campaign_name ?? null,
+        campaignStatus: campaignStatus.get(r.campaign_id ?? "") ?? null,
         spend: num(r.spend),
         impressions: num(r.impressions),
         clicks: num(r.clicks),

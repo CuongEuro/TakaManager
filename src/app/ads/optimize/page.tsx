@@ -31,6 +31,7 @@ interface AttributionInfo {
 
 interface OptimizeResponse {
   preset: RangePreset;
+  range: { start: string; end: string; days: number };
   storeId: string | null;
   platform: string | null;
   breakEvenRoas: number;
@@ -120,6 +121,10 @@ export default function OptimizePage() {
     "all"
   );
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // "Cập nhật Ads" — sync latest ad data (incl. campaign status for the filter).
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     fetch("/api/stores")
@@ -184,7 +189,49 @@ export default function OptimizePage() {
         setOpen(auto);
       })
       .finally(() => setLoading(false));
-  }, [preset, storeId, platform]);
+  }, [preset, storeId, platform, reloadTick]);
+
+  // Sync the latest ad data (campaign spend + STATUS, over the visible window)
+  // for every active/configured account, then reload the tree. Light sync
+  // (deep=false) — fast and reliable; use "Đồng bộ sâu" on Kết nối Ads for
+  // adset-level backfill.
+  async function updateAds() {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const accounts: {
+        id: string;
+        active: boolean;
+        configured: boolean;
+      }[] = await fetch("/api/ads/accounts").then((r) => r.json());
+      const targets = accounts.filter((a) => a.active && a.configured);
+      if (targets.length === 0) {
+        setSyncMsg("Chưa có tài khoản Ads nào được cấu hình.");
+        return;
+      }
+      const since = data?.range.start;
+      const until = data?.range.end;
+      let ok = 0;
+      for (const a of targets) {
+        try {
+          const r = await fetch("/api/ads/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ accountId: a.id, since, until, deep: false }),
+          }).then((x) => x.json());
+          if (r.results?.[0]?.ok) ok++;
+        } catch {
+          /* keep going — per-account failures are tolerated */
+        }
+      }
+      setSyncMsg(`✓ Đã cập nhật ${ok}/${targets.length} tài khoản Ads.`);
+      setReloadTick((t) => t + 1); // reload the tree with fresh status/spend
+    } catch (e) {
+      setSyncMsg(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   async function askAi() {
     setAiLoading(true);
@@ -290,9 +337,24 @@ export default function OptimizePage() {
                 <option value="TWITTER">Twitter/X</option>
               </Select>
             </div>
+            <Button onClick={updateAds} disabled={syncing || loading}>
+              {syncing ? "Đang cập nhật..." : "🔄 Cập nhật Ads"}
+            </Button>
           </div>
         }
       />
+
+      {syncMsg && (
+        <div
+          className={`mb-4 rounded-lg px-4 py-2 text-sm ${
+            syncMsg.startsWith("⚠")
+              ? "bg-rose-50 text-rose-700"
+              : "bg-emerald-50 text-emerald-700"
+          }`}
+        >
+          {syncMsg}
+        </div>
+      )}
 
       {loading && !data ? (
         <EmptyState message="Đang tải..." />

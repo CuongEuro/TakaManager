@@ -276,12 +276,20 @@ export async function syncAdAccount(
 
     // Ensure a CAMPAIGN entity exists for every campaign that has spend (even if
     // the deep adset fetch returned nothing for it) so attribution can map it.
-    // update touches name only → preserves the user's campaign→store mapping.
-    const insightCampaigns = new Map<string, string | null>();
+    // Also refresh name + status (from the light insights) so the Active/Inactive
+    // filter works after ANY sync. update never touches storeId → preserves the
+    // user's campaign→store mapping.
+    const insightCampaigns = new Map<
+      string,
+      { name: string | null; status: string | null }
+    >();
     for (const ins of insights)
       if (ins.campaignExternalId)
-        insightCampaigns.set(ins.campaignExternalId, ins.campaignName);
-    for (const [externalId, name] of insightCampaigns) {
+        insightCampaigns.set(ins.campaignExternalId, {
+          name: ins.campaignName,
+          status: ins.campaignStatus,
+        });
+    for (const [externalId, c] of insightCampaigns) {
       await prisma.adEntity.upsert({
         where: { accountId_externalId: { accountId: a.id, externalId } },
         create: {
@@ -291,9 +299,13 @@ export async function syncAdAccount(
           platform: a.platform,
           level: "CAMPAIGN",
           externalId,
-          name: name ?? "(unknown)",
+          name: c.name ?? "(unknown)",
+          status: c.status,
         },
-        update: name ? { name } : {},
+        update: {
+          ...(c.name ? { name: c.name } : {}),
+          ...(c.status ? { status: c.status } : {}),
+        },
       });
     }
 

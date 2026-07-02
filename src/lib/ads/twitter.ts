@@ -182,6 +182,7 @@ export async function fetchTwitterInsights(
     Math.round((end.getTime() - start.getTime()) / 86400000)
   );
   const byId = new Map(campaigns.map((c) => [c.id, c.name]));
+  const statusById = new Map(campaigns.map((c) => [c.id, c.status]));
   const out: AdInsight[] = [];
 
   // stats endpoint accepts up to 20 entity ids per request
@@ -219,6 +220,7 @@ export async function fetchTwitterInsights(
           date: ymd(day),
           campaignExternalId: row.id ?? null,
           campaignName: byId.get(row.id) ?? null,
+          campaignStatus: statusById.get(row.id) ?? null,
           spend,
           impressions,
           clicks,
