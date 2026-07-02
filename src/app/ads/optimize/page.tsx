@@ -87,6 +87,17 @@ const ACTION_TONE: Record<Action, "green" | "blue" | "amber" | "rose" | "slate">
   OFF: "slate",
 };
 
+// Order the action-filter chips are shown in (most actionable first).
+const ACTION_ORDER: Action[] = [
+  "SCALE",
+  "REDUCE",
+  "PAUSE",
+  "KEEP",
+  "REVIEW",
+  "NO_DATA",
+  "OFF",
+];
+
 export default function OptimizePage() {
   const [preset, setPreset] = useState<RangePreset>("last30");
   const [storeId, setStoreId] = useState("");
@@ -103,6 +114,12 @@ export default function OptimizePage() {
   const [unread, setUnread] = useState(0);
   const [reports, setReports] = useState<ReportMeta[]>([]);
   const [reportId, setReportId] = useState("");
+  // Client-side filters over the loaded tree + campaign selection for the AI.
+  const [actionFilter, setActionFilter] = useState<Set<Action>>(new Set());
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">(
+    "all"
+  );
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetch("/api/stores")
@@ -156,6 +173,7 @@ export default function OptimizePage() {
       .then((r) => r.json())
       .then((d) => {
         setData(d);
+        setSelected(new Set()); // selection is per data load
         // auto-open campaigns that need action (SCALE/PAUSE)
         const recoMap = recoById(d.optimize.recommendations);
         const auto = new Set<string>();
@@ -176,7 +194,13 @@ export default function OptimizePage() {
       const r = await fetch("/api/ads/optimize/ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ preset, storeId, platform }),
+        body: JSON.stringify({
+          preset,
+          storeId,
+          platform,
+          // Focus the analysis on the chosen campaigns (else all in view).
+          campaignIds: selected.size > 0 ? [...selected] : undefined,
+        }),
       }).then((x) => x.json());
       setAi(
         r.ok
@@ -191,8 +215,42 @@ export default function OptimizePage() {
     }
   }
 
-  const recoMap = data ? recoById(data.optimize.recommendations) : new Map();
+  const recoMap: Map<string, Reco> = data
+    ? recoById(data.optimize.recommendations)
+    : new Map();
   const counts = data?.optimize.counts;
+
+  const isInactive = (c: CampaignNode) =>
+    c.status === "PAUSED" || c.status === "ARCHIVED";
+
+  // Campaigns after the action + status filters (drives both the tree and the
+  // "select all visible" helper).
+  const visibleCampaigns = (data?.tree.campaigns ?? []).filter((c) => {
+    const reco = recoMap.get(c.id);
+    if (actionFilter.size > 0 && (!reco || !actionFilter.has(reco.action)))
+      return false;
+    if (statusFilter === "active" && isInactive(c)) return false;
+    if (statusFilter === "inactive" && !isInactive(c)) return false;
+    return true;
+  });
+
+  function toggleAction(a: Action) {
+    setActionFilter((prev) => {
+      const n = new Set(prev);
+      n.has(a) ? n.delete(a) : n.add(a);
+      return n;
+    });
+  }
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  }
+  const allVisibleSelected =
+    visibleCampaigns.length > 0 &&
+    visibleCampaigns.every((c) => selected.has(c.id));
 
   return (
     <div>
@@ -270,24 +328,27 @@ export default function OptimizePage() {
             </Card>
             {counts && (
               <>
-                <Card>
-                  <div className="text-xs uppercase text-slate-400">Nên scale</div>
-                  <div className="mt-1 text-xl font-bold text-emerald-600">
-                    {counts.SCALE}
-                  </div>
-                </Card>
-                <Card>
-                  <div className="text-xs uppercase text-slate-400">Giảm/Tối ưu</div>
-                  <div className="mt-1 text-xl font-bold text-amber-600">
-                    {counts.REDUCE}
-                  </div>
-                </Card>
-                <Card>
-                  <div className="text-xs uppercase text-slate-400">Nên dừng</div>
-                  <div className="mt-1 text-xl font-bold text-rose-600">
-                    {counts.PAUSE}
-                  </div>
-                </Card>
+                <CountCard
+                  label="Nên scale"
+                  value={counts.SCALE}
+                  color="text-emerald-600"
+                  active={actionFilter.has("SCALE")}
+                  onClick={() => toggleAction("SCALE")}
+                />
+                <CountCard
+                  label="Giảm/Tối ưu"
+                  value={counts.REDUCE}
+                  color="text-amber-600"
+                  active={actionFilter.has("REDUCE")}
+                  onClick={() => toggleAction("REDUCE")}
+                />
+                <CountCard
+                  label="Nên dừng"
+                  value={counts.PAUSE}
+                  color="text-rose-600"
+                  active={actionFilter.has("PAUSE")}
+                  onClick={() => toggleAction("PAUSE")}
+                />
               </>
             )}
           </div>
@@ -504,20 +565,126 @@ export default function OptimizePage() {
             </Card>
           )}
 
+          {/* Filters + campaign selection */}
+          <Card>
+            <div className="flex flex-col gap-3">
+              {/* Action filter chips (with live counts) */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="mr-1 text-xs font-semibold text-slate-500">
+                  Hành động:
+                </span>
+                {ACTION_ORDER.filter((a) => (counts?.[a] ?? 0) > 0).map((a) => {
+                  const on = actionFilter.has(a);
+                  return (
+                    <button
+                      key={a}
+                      onClick={() => toggleAction(a)}
+                      className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+                        on
+                          ? "border-brand-600 bg-brand-600 text-white"
+                          : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                      }`}
+                    >
+                      {ACTION_LABELS[a]} ({counts?.[a] ?? 0})
+                    </button>
+                  );
+                })}
+                {actionFilter.size > 0 && (
+                  <button
+                    onClick={() => setActionFilter(new Set())}
+                    className="ml-1 text-xs text-slate-400 underline hover:text-slate-600"
+                  >
+                    Bỏ lọc
+                  </button>
+                )}
+              </div>
+
+              {/* Status filter + selection controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-xs font-semibold text-slate-500">
+                  Trạng thái:
+                </span>
+                <div className="flex rounded-lg border border-slate-200 bg-white p-1">
+                  {(
+                    [
+                      ["all", "Tất cả"],
+                      ["active", "Đang chạy"],
+                      ["inactive", "Đã tắt"],
+                    ] as const
+                  ).map(([v, label]) => (
+                    <button
+                      key={v}
+                      onClick={() => setStatusFilter(v)}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium ${
+                        statusFilter === v
+                          ? "bg-brand-600 text-white"
+                          : "text-slate-500 hover:bg-slate-100"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <span className="ml-auto text-xs text-slate-400">
+                  {selected.size > 0
+                    ? `Đã chọn ${selected.size} campaign để hỏi AI`
+                    : `${visibleCampaigns.length} campaign hiển thị`}
+                </span>
+                <button
+                  onClick={() =>
+                    setSelected(
+                      allVisibleSelected
+                        ? new Set()
+                        : new Set(visibleCampaigns.map((c) => c.id))
+                    )
+                  }
+                  className="text-xs font-medium text-brand-600 hover:text-brand-700"
+                >
+                  {allVisibleSelected ? "Bỏ chọn tất cả" : "Chọn tất cả (đang hiện)"}
+                </button>
+                {selected.size > 0 && (
+                  <Button onClick={askAi} disabled={aiLoading}>
+                    {aiLoading
+                      ? "Đang phân tích..."
+                      : `🤖 Hỏi AI (${selected.size} campaign)`}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </Card>
+
           {/* Campaign → adset tree */}
           <div className="space-y-3">
-            {data.tree.campaigns.map((c) => {
+            {visibleCampaigns.length === 0 ? (
+              <EmptyState message="Không có campaign nào khớp bộ lọc." />
+            ) : (
+              visibleCampaigns.map((c) => {
               const reco = recoMap.get(c.id) as Reco | undefined;
               const isOpen = open.has(c.id);
+              const checked = selected.has(c.id);
               return (
                 <Card key={c.id} className="!p-0">
+                  <div className="flex items-center">
+                    <label
+                      className="flex cursor-pointer items-center pl-4 pr-1"
+                      title="Chọn để hỏi AI riêng campaign này"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSelect(c.id)}
+                        className="h-4 w-4 accent-brand-600"
+                      />
+                    </label>
                   <button
                     onClick={() => {
                       const n = new Set(open);
                       isOpen ? n.delete(c.id) : n.add(c.id);
                       setOpen(n);
                     }}
-                    className="flex w-full items-center gap-3 px-5 py-3 text-left hover:bg-slate-50"
+                    className="flex w-full items-center gap-3 px-3 py-3 text-left hover:bg-slate-50"
                   >
                     <span className="text-slate-400">{isOpen ? "▾" : "▸"}</span>
                     <Badge tone="blue">{AD_PLATFORM_LABELS[c.platform] ?? c.platform}</Badge>
@@ -565,6 +732,7 @@ export default function OptimizePage() {
                       )}
                     {reco && <Badge tone={ACTION_TONE[reco.action]}>{ACTION_LABELS[reco.action]}</Badge>}
                   </button>
+                  </div>
 
                   {isOpen && (
                     <div className="border-t border-slate-100 bg-slate-50/50 px-5 py-3">
@@ -610,11 +778,40 @@ export default function OptimizePage() {
                   )}
                 </Card>
               );
-            })}
+              })
+            )}
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+// Summary count that doubles as a quick action-filter toggle.
+function CountCard({
+  label,
+  value,
+  color,
+  active,
+  onClick,
+}: {
+  label: string;
+  value: number;
+  color: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button onClick={onClick} className="text-left">
+      <Card
+        className={`transition ${
+          active ? "!border-brand-500 ring-1 ring-brand-500" : "hover:bg-slate-50"
+        }`}
+      >
+        <div className="text-xs uppercase text-slate-400">{label}</div>
+        <div className={`mt-1 text-xl font-bold ${color}`}>{value}</div>
+      </Card>
+    </button>
   );
 }
 

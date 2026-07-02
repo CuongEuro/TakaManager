@@ -19,6 +19,10 @@ export async function POST(req: NextRequest) {
   const preset = (b.preset ?? "last30") as RangePreset;
   const storeId = b.storeId || undefined;
   const platform = b.platform || undefined;
+  // Optional: focus the analysis on a chosen subset of campaigns.
+  const campaignIds: string[] | null = Array.isArray(b.campaignIds)
+    ? b.campaignIds.filter((x: unknown): x is string => typeof x === "string")
+    : null;
   const range = resolveRange(preset);
 
   const [tree, bes, store] = await Promise.all([
@@ -46,6 +50,14 @@ export async function POST(req: NextRequest) {
       c.realRevenue = real.realRevenue;
       c.realRoas = c.spend > 0 ? real.realRevenue / c.spend : 0;
     }
+  }
+
+  // Narrow to the selected campaigns AFTER decoration → the rules, budget plan
+  // and AI payload all scope to just those (attribution match rates stay
+  // platform-wide, which is what they measure).
+  if (campaignIds && campaignIds.length > 0) {
+    const keep = new Set(campaignIds);
+    tree.campaigns = tree.campaigns.filter((c) => keep.has(c.id));
   }
 
   const breakEvenRoas =
