@@ -2,7 +2,14 @@
 // META (Facebook) Marketing API — Insights at campaign × day level.
 // Auth: a (long-lived) access token. externalId = ad account id (act_xxxxx).
 // ---------------------------------------------------------------------------
-import { AdAccountCreds, AdInsight, AdsetInsight, num, ymd } from "./types";
+import {
+  AdAccountCreds,
+  AdInsight,
+  AdsetInsight,
+  normalizeAdStatus,
+  num,
+  ymd,
+} from "./types";
 
 // Meta deprecates each Graph/Marketing API version ~2 years after release.
 // Keep current to avoid a hard cutoff. (v20 deprecates 2026-09-24; latest is
@@ -98,6 +105,35 @@ interface MetaAdsetRow extends MetaRow {
   adset_name?: string;
 }
 
+/** Current effective_status of every campaign or adset in the account (the
+ *  insights API carries no status). 1–2 extra calls per sync. */
+async function fetchStatusMap(
+  creds: AdAccountCreds,
+  edge: "campaigns" | "adsets"
+): Promise<Map<string, string | null>> {
+  const acct = creds.externalId.startsWith("act_")
+    ? creds.externalId
+    : `act_${creds.externalId}`;
+  const params = new URLSearchParams({
+    fields: "id,effective_status",
+    limit: "500",
+    access_token: creds.accessToken ?? "",
+  });
+  const map = new Map<string, string | null>();
+  let url: string | null = `https://graph.facebook.com/${API_VERSION}/${acct}/${edge}?${params}`;
+  for (let page = 0; page < 50 && url; page++) {
+    const res: Response = await fetch(url);
+    const json = await res.json();
+    if (!res.ok || json.error)
+      throw new Error(json.error?.message ?? `Meta HTTP ${res.status}`);
+    for (const r of (json.data ?? []) as { id?: string; effective_status?: string }[]) {
+      if (r.id) map.set(r.id, normalizeAdStatus(r.effective_status));
+    }
+    url = json.paging?.next ?? null;
+  }
+  return map;
+}
+
 /** Deep fetch: ad set × day insights, carrying parent campaign id/name. */
 export async function fetchMetaAdsets(
   creds: AdAccountCreds,
@@ -108,6 +144,18 @@ export async function fetchMetaAdsets(
   const acct = creds.externalId.startsWith("act_")
     ? creds.externalId
     : `act_${creds.externalId}`;
+
+  // Statuses are best-effort — a failure here must not kill the metrics sync.
+  let campaignStatus = new Map<string, string | null>();
+  let adsetStatus = new Map<string, string | null>();
+  try {
+    [campaignStatus, adsetStatus] = await Promise.all([
+      fetchStatusMap(creds, "campaigns"),
+      fetchStatusMap(creds, "adsets"),
+    ]);
+  } catch {
+    /* keep null statuses */
+  }
 
   const params = new URLSearchParams({
     level: "adset",
@@ -131,9 +179,10 @@ export async function fetchMetaAdsets(
       out.push({
         campaignExternalId: r.campaign_id ?? "",
         campaignName: r.campaign_name ?? "(unknown)",
+        campaignStatus: campaignStatus.get(r.campaign_id ?? "") ?? null,
         adsetExternalId: r.adset_id ?? "",
         adsetName: r.adset_name ?? "(unknown)",
-        status: null,
+        status: adsetStatus.get(r.adset_id ?? "") ?? null,
         date: r.date_start,
         spend: num(r.spend),
         impressions: num(r.impressions),

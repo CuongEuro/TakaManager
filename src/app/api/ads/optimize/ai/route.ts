@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { resolveRange, RangePreset } from "@/lib/dates";
 import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
-import { computeDashboard } from "@/lib/pnl";
+import { computeStoreBreakEvens } from "@/lib/pnl";
 import { aiOptimize } from "@/lib/ai";
 import { getSession } from "@/lib/auth";
 
@@ -20,14 +20,9 @@ export async function POST(req: NextRequest) {
   const platform = b.platform || undefined;
   const range = resolveRange(preset);
 
-  const [tree, dash, store] = await Promise.all([
+  const [tree, bes, store] = await Promise.all([
     getAdTree(range, { organizationId: session.oid, storeId, platform }),
-    computeDashboard({
-      organizationId: session.oid,
-      start: range.start,
-      end: range.end,
-      storeId,
-    }),
+    computeStoreBreakEvens(session.oid, range.start, range.end),
     storeId
       ? prisma.store.findFirst({
           where: { id: storeId, organizationId: session.oid },
@@ -36,8 +31,15 @@ export async function POST(req: NextRequest) {
       : Promise.resolve(null),
   ]);
 
-  const breakEvenRoas = dash.summary.metrics.breakEvenRoas || 1.5;
-  const rules = optimizeTree(tree, breakEvenRoas);
+  const breakEvenRoas =
+    (storeId ? bes.byStore.get(storeId) : undefined) ?? bes.blended;
+  const campaignBe = new Map<string, number>();
+  for (const c of tree.campaigns) {
+    const be = c.storeId ? bes.byStore.get(c.storeId) : undefined;
+    if (be) campaignBe.set(c.id, be);
+  }
+  const pauseMinSpend = Math.max(3000, Math.round(2 * bes.aov));
+  const rules = optimizeTree(tree, breakEvenRoas, { campaignBe, pauseMinSpend });
 
   const result = await aiOptimize(tree, rules, {
     preset,

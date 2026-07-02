@@ -1,12 +1,20 @@
 // ---------------------------------------------------------------------------
 // RULE-BASED OPTIMIZER — turns the Campaign→AdSet KPI tree into concrete
 // per-entity actions (Scale / Keep / Reduce / Pause / Review) with reasons.
-// Deterministic; works without any AI key. ROAS is judged vs break-even.
+// Deterministic; works without any AI key. ROAS is judged vs break-even —
+// per-campaign break-even (its store's margin) when available.
 // ---------------------------------------------------------------------------
 import { AdTree, Kpis } from "@/lib/adinsights";
 import { formatJPY, formatMultiplier, formatPercent } from "@/lib/format";
 
-export type Action = "SCALE" | "KEEP" | "REDUCE" | "PAUSE" | "REVIEW";
+export type Action =
+  | "SCALE"
+  | "KEEP"
+  | "REDUCE"
+  | "PAUSE"
+  | "REVIEW"
+  | "NO_DATA"
+  | "OFF";
 
 export const ACTION_LABELS: Record<Action, string> = {
   SCALE: "🚀 Tăng ngân sách",
@@ -14,6 +22,8 @@ export const ACTION_LABELS: Record<Action, string> = {
   REDUCE: "↓ Giảm / Tối ưu",
   PAUSE: "⛔ Tạm dừng",
   REVIEW: "🔍 Chưa đủ data",
+  NO_DATA: "⚠ Thiếu tracking chuyển đổi",
+  OFF: "💤 Đã tắt",
 };
 
 export interface Reco {
@@ -25,6 +35,7 @@ export interface Reco {
   priority: number; // 1 = cao nhất
   roas: number;
   spend: number;
+  breakEven: number; // the bar this entity was judged against
   reasons: string[];
 }
 
@@ -36,10 +47,15 @@ export interface OptimizeResult {
 
 const DEFAULT_MIN_SPEND = 3000; // ¥ over the range — below this we can't judge
 
+const isOff = (status: string | null | undefined) =>
+  status === "PAUSED" || status === "ARCHIVED";
+
 function evaluate(
   k: Kpis,
   be: number,
-  minSpend: number
+  minSpend: number,
+  pauseMinSpend: number,
+  noConvData: boolean
 ): { action: Action; priority: number; reasons: string[] } {
   const reasons: string[] = [];
 
@@ -51,8 +67,26 @@ function evaluate(
   }
 
   if (k.conversions === 0) {
+    // The whole platform reports zero conversions → tracking gap, not a bad
+    // campaign. Don't recommend killing spend based on missing data.
+    if (noConvData) {
+      reasons.push(
+        "Nền tảng không trả về dữ liệu chuyển đổi nào — kiểm tra conversion tracking trước khi đánh giá."
+      );
+      return { action: "NO_DATA", priority: 2, reasons };
+    }
+    if (k.spend < pauseMinSpend) {
+      reasons.push(
+        `Đã tiêu ${formatJPY(k.spend)} với 0 chuyển đổi — chưa chạm ngưỡng kết luận ${formatJPY(
+          pauseMinSpend
+        )} (~2×AOV), theo dõi thêm.`
+      );
+      return { action: "REVIEW", priority: 2, reasons };
+    }
     reasons.push(
-      `Đã tiêu ${formatJPY(k.spend)} nhưng 0 chuyển đổi — nên tạm dừng.`
+      `Đã tiêu ${formatJPY(k.spend)} (≥ ${formatJPY(
+        pauseMinSpend
+      )} ≈ 2×AOV) nhưng 0 chuyển đổi — nên tạm dừng.`
     );
     return { action: "PAUSE", priority: 1, reasons };
   }
@@ -105,26 +139,61 @@ function evaluate(
 export function optimizeTree(
   tree: AdTree,
   breakEvenRoas: number,
-  opts: { minSpend?: number } = {}
+  opts: {
+    minSpend?: number;
+    /** PAUSE-for-zero-conversions threshold (≈ 2×AOV). */
+    pauseMinSpend?: number;
+    /** Per-campaign break-even (campaign id → its store's BE). */
+    campaignBe?: Map<string, number>;
+  } = {}
 ): OptimizeResult {
-  const be = breakEvenRoas > 0 ? breakEvenRoas : 1;
+  const blended = breakEvenRoas > 0 ? breakEvenRoas : 1;
   const minSpend = opts.minSpend ?? DEFAULT_MIN_SPEND;
+  const pauseMinSpend = Math.max(minSpend, opts.pauseMinSpend ?? minSpend);
   const recs: Reco[] = [];
 
+  // Platforms whose data carries ZERO conversions despite real spend — a
+  // tracking gap (e.g. X without conversion tracking): flag, don't PAUSE.
+  const platConv = new Map<string, { spend: number; conv: number }>();
   for (const c of tree.campaigns) {
-    const ce = evaluate(c, be, minSpend);
+    const p = platConv.get(c.platform) ?? { spend: 0, conv: 0 };
+    p.spend += c.spend;
+    p.conv += c.conversions;
+    platConv.set(c.platform, p);
+  }
+  const noConvPlatforms = new Set(
+    [...platConv.entries()]
+      .filter(([, v]) => v.spend > minSpend && v.conv === 0)
+      .map(([k]) => k)
+  );
 
-    // structural hint: budget reallocation when adsets diverge
-    const scalers = c.adsets.filter(
-      (a) => a.spend >= minSpend && a.roas >= be * 1.3
-    );
-    const losers = c.adsets.filter(
-      (a) => a.spend >= minSpend && a.roas < be * 0.7 && a.conversions >= 0
-    );
-    if (scalers.length && losers.length) {
-      ce.reasons.push(
-        `Tái phân bổ: chuyển ngân sách từ ${losers.length} adset kém sang ${scalers.length} adset tốt trong campaign.`
+  for (const c of tree.campaigns) {
+    const be = opts.campaignBe?.get(c.id) ?? blended;
+    const noConvData = noConvPlatforms.has(c.platform);
+    const campaignOff = isOff(c.status);
+
+    let ce: { action: Action; priority: number; reasons: string[] };
+    if (campaignOff) {
+      ce = {
+        action: "OFF",
+        priority: 5,
+        reasons: ["Campaign đã tắt trên nền tảng — không cần hành động."],
+      };
+    } else {
+      ce = evaluate(c, be, minSpend, pauseMinSpend, noConvData);
+
+      // structural hint: budget reallocation when adsets diverge
+      const scalers = c.adsets.filter(
+        (a) => !isOff(a.status) && a.spend >= minSpend && a.roas >= be * 1.3
       );
+      const losers = c.adsets.filter(
+        (a) => !isOff(a.status) && a.spend >= minSpend && a.roas < be * 0.7
+      );
+      if (scalers.length && losers.length) {
+        ce.reasons.push(
+          `Tái phân bổ: chuyển ngân sách từ ${losers.length} adset kém sang ${scalers.length} adset tốt trong campaign.`
+        );
+      }
     }
 
     recs.push({
@@ -135,11 +204,23 @@ export function optimizeTree(
       priority: ce.priority,
       roas: c.roas,
       spend: c.spend,
+      breakEven: be,
       reasons: ce.reasons,
     });
 
     for (const a of c.adsets) {
-      const ae = evaluate(a, be, minSpend);
+      const ae =
+        campaignOff || isOff(a.status)
+          ? {
+              action: "OFF" as Action,
+              priority: 5,
+              reasons: [
+                campaignOff
+                  ? "Campaign cha đã tắt — adset không chạy."
+                  : "Adset đã tắt trên nền tảng — không cần hành động.",
+              ],
+            }
+          : evaluate(a, be, minSpend, pauseMinSpend, noConvData);
       recs.push({
         level: "ADSET",
         id: a.id,
@@ -149,6 +230,7 @@ export function optimizeTree(
         priority: ae.priority,
         roas: a.roas,
         spend: a.spend,
+        breakEven: be,
         reasons: ae.reasons,
       });
     }
@@ -160,11 +242,13 @@ export function optimizeTree(
     REDUCE: 0,
     PAUSE: 0,
     REVIEW: 0,
+    NO_DATA: 0,
+    OFF: 0,
   };
   for (const r of recs) counts[r.action]++;
 
   // sort: highest priority first, then by spend (biggest money first)
   recs.sort((a, b) => a.priority - b.priority || b.spend - a.spend);
 
-  return { breakEvenRoas: be, recommendations: recs, counts };
+  return { breakEvenRoas: blended, recommendations: recs, counts };
 }

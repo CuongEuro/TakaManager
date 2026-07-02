@@ -4,7 +4,14 @@
 // Needs: developerToken, clientId, clientSecret, refreshToken, externalId
 // (customer id, digits only), optional loginCustomerId (MCC).
 // ---------------------------------------------------------------------------
-import { AdAccountCreds, AdInsight, AdsetInsight, num, ymd } from "./types";
+import {
+  AdAccountCreds,
+  AdInsight,
+  AdsetInsight,
+  normalizeAdStatus,
+  num,
+  ymd,
+} from "./types";
 
 // Google Ads API now ships monthly and each version sunsets ~6 months after
 // release, returning HTML 404 on the old path once gone. Keep this current.
@@ -121,7 +128,7 @@ export async function fetchGoogleInsights(
 }
 
 interface GoogleAdGroupResult extends GoogleResult {
-  campaign?: { id?: string; name?: string };
+  campaign?: { id?: string; name?: string; status?: string };
   adGroup?: { id?: string; name?: string; status?: string };
 }
 
@@ -134,8 +141,8 @@ export async function fetchGoogleAdsets(
   const token = await getAccessToken(creds);
   const cid = customerId(creds);
   const query = `
-    SELECT campaign.id, campaign.name, ad_group.id, ad_group.name,
-           ad_group.status, segments.date, metrics.cost_micros,
+    SELECT campaign.id, campaign.name, campaign.status, ad_group.id,
+           ad_group.name, ad_group.status, segments.date, metrics.cost_micros,
            metrics.impressions, metrics.clicks, metrics.conversions,
            metrics.conversions_value
     FROM ad_group
@@ -156,9 +163,10 @@ export async function fetchGoogleAdsets(
       out.push({
         campaignExternalId: r.campaign?.id ?? "",
         campaignName: r.campaign?.name ?? "(unknown)",
+        campaignStatus: normalizeAdStatus(r.campaign?.status),
         adsetExternalId: r.adGroup?.id ?? "",
         adsetName: r.adGroup?.name ?? "(unknown)",
-        status: r.adGroup?.status ?? null,
+        status: normalizeAdStatus(r.adGroup?.status),
         date: r.segments?.date ?? "",
         spend: num(r.metrics?.costMicros) / 1_000_000,
         impressions: num(r.metrics?.impressions),

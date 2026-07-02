@@ -174,6 +174,9 @@ export default function AdAccountsPage() {
   // Bulk-sync progress + per-account results (browser-driven, one account at a time).
   const [syncProg, setSyncProg] = useState<{ done: number; total: number } | null>(null);
   const [syncResults, setSyncResults] = useState<SyncResult[]>([]);
+  // Deep (adset-level) sync for EVERY chunk, not just the newest — needed to
+  // backfill the optimize tree's history (e.g. after the tax-consistency fix).
+  const [deepAll, setDeepAll] = useState(false);
 
   // Campaign → store mapping panel state
   const [mapAccount, setMapAccount] = useState<AdAccount | null>(null);
@@ -367,7 +370,12 @@ export default function AdAccountsPage() {
     for (let i = 0; i < chunks.length; i++) {
       const c = chunks[i];
       try {
-        const res = await syncChunkRetry(a.id, c.since, c.until, i === chunks.length - 1);
+        const res = await syncChunkRetry(
+          a.id,
+          c.since,
+          c.until,
+          deepAll || i === chunks.length - 1
+        );
         rows += res.rows;
       } catch (e) {
         ok = false;
@@ -461,6 +469,19 @@ export default function AdAccountsPage() {
               </span>
               <DateRangePicker value={range} onChange={setRange} disabled={!!busy} />
             </div>
+            <label
+              className="flex items-center gap-1.5 text-xs text-slate-600"
+              title="Kéo chi tiết adset cho MỌI khoảng ngày (chậm hơn) — dùng khi cần backfill dữ liệu Tối ưu Ads"
+            >
+              <input
+                type="checkbox"
+                checked={deepAll}
+                onChange={(e) => setDeepAll(e.target.checked)}
+                disabled={!!busy}
+                className="h-3.5 w-3.5 accent-brand-600"
+              />
+              Đồng bộ sâu (adset) toàn bộ khoảng
+            </label>
             <Button onClick={syncAll} disabled={!!busy}>
               {busy === "ALL" && syncProg
                 ? `Đang đồng bộ ${syncProg.done}/${syncProg.total}...`

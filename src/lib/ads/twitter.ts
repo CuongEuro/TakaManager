@@ -5,7 +5,14 @@
 // NOTE: stats parsing is best-effort/experimental — validate with real creds.
 // ---------------------------------------------------------------------------
 import { createHmac, randomBytes } from "crypto";
-import { AdAccountCreds, AdInsight, AdsetInsight, num, ymd } from "./types";
+import {
+  AdAccountCreds,
+  AdInsight,
+  AdsetInsight,
+  normalizeAdStatus,
+  num,
+  ymd,
+} from "./types";
 
 const API = "https://ads-api.twitter.com/12";
 
@@ -91,6 +98,7 @@ export async function testTwitter(creds: AdAccountCreds): Promise<string> {
 interface Campaign {
   id: string;
   name: string;
+  status: string | null;
 }
 
 async function fetchCampaigns(creds: AdAccountCreds): Promise<Campaign[]> {
@@ -100,11 +108,61 @@ async function fetchCampaigns(creds: AdAccountCreds): Promise<Campaign[]> {
     const q: Record<string, string> = { count: "200" };
     if (cursor) q.cursor = cursor;
     const json = await signedGet(creds, `/accounts/${creds.externalId}/campaigns`, q);
-    for (const c of json.data ?? []) out.push({ id: c.id, name: c.name });
+    for (const c of json.data ?? [])
+      out.push({
+        id: c.id,
+        name: c.name,
+        status: normalizeAdStatus(c.entity_status),
+      });
     cursor = json.next_cursor;
     if (!cursor) break;
   }
   return out;
+}
+
+// --- WEB_CONVERSION metric parsing ------------------------------------------
+// X returns conversion metrics either as a plain per-day array, or (typical) as
+// an attribution object: { post_view: number[], post_engagement: number[],
+// assisted: [...], order_quantity: [...], sale_amount: [...] } — amounts in
+// local micro. Exact keys are version-dependent → parse defensively and log
+// the metric keys once per sync so a mismatch is visible in Vercel logs.
+type ConvMetric = unknown;
+
+function convCount(m: ConvMetric, d: number): number {
+  if (!m) return 0;
+  if (Array.isArray(m)) return num(m[d]);
+  const o = m as Record<string, unknown>;
+  const pick = (k: string) => {
+    const arr = o[k];
+    return Array.isArray(arr) ? num(arr[d]) : 0;
+  };
+  return pick("post_engagement") + pick("post_view");
+}
+
+function convSale(m: ConvMetric, d: number): number {
+  if (!m) return 0;
+  const o = Array.isArray(m) ? null : (m as Record<string, unknown>);
+  const arr = o
+    ? (o.sale_amount ?? o.sale_amount_local_micro)
+    : null;
+  return Array.isArray(arr) ? num(arr[d]) / 1_000_000 : 0;
+}
+
+let loggedMetricKeys = false;
+function logMetricKeysOnce(metrics: Record<string, unknown>) {
+  if (loggedMetricKeys) return;
+  loggedMetricKeys = true;
+  try {
+    const cp = metrics.conversion_purchases;
+    console.log(
+      "[X Ads] stats metric keys:",
+      Object.keys(metrics).join(","),
+      "| conversion_purchases keys:",
+      cp && !Array.isArray(cp) ? Object.keys(cp as object).join(",") : typeof cp
+    );
+  } catch {
+    /* logging only */
+  }
 }
 
 export async function fetchTwitterInsights(
@@ -132,7 +190,7 @@ export async function fetchTwitterInsights(
     const json = await signedGet(creds, `/stats/accounts/${creds.externalId}`, {
       entity: "CAMPAIGN",
       entity_ids: batch.map((c) => c.id).join(","),
-      metric_groups: "BILLING,ENGAGEMENT",
+      metric_groups: "BILLING,ENGAGEMENT,WEB_CONVERSION",
       granularity: "DAY",
       placement: "ALL_ON_TWITTER",
       start_time: `${ymd(start)}T00:00:00Z`,
@@ -141,16 +199,22 @@ export async function fetchTwitterInsights(
 
     for (const row of json.data ?? []) {
       const metrics = row.id_data?.[0]?.metrics ?? {};
+      logMetricKeysOnce(metrics);
       const spendArr: (number | null)[] = metrics.billed_charge_local_micro ?? [];
       const imprArr: (number | null)[] = metrics.impressions ?? [];
       const clickArr: (number | null)[] = metrics.clicks ?? [];
+      const purchases: ConvMetric = metrics.conversion_purchases;
       for (let d = 0; d < dayCount; d++) {
         const day = new Date(start);
         day.setDate(start.getDate() + d);
         const spend = num(spendArr[d]) / 1_000_000;
         const impressions = num(imprArr[d]);
         const clicks = num(clickArr[d]);
-        if (spend === 0 && impressions === 0 && clicks === 0) continue;
+        const conversions = convCount(purchases, d);
+        const revenue = convSale(purchases, d);
+        // Keep zero-spend days that still carry conversions (view-through).
+        if (spend === 0 && impressions === 0 && clicks === 0 && conversions === 0)
+          continue;
         out.push({
           date: ymd(day),
           campaignExternalId: row.id ?? null,
@@ -158,8 +222,8 @@ export async function fetchTwitterInsights(
           spend,
           impressions,
           clicks,
-          conversions: 0,
-          revenue: 0,
+          conversions,
+          revenue,
         });
       }
     }
@@ -206,6 +270,7 @@ export async function fetchTwitterAdsets(
   ]);
   if (lineItems.length === 0) return [];
   const campName = new Map(campaigns.map((c) => [c.id, c.name]));
+  const campStatus = new Map(campaigns.map((c) => [c.id, c.status]));
 
   const start = new Date(since);
   start.setHours(0, 0, 0, 0);
@@ -223,7 +288,7 @@ export async function fetchTwitterAdsets(
     const json = await signedGet(creds, `/stats/accounts/${creds.externalId}`, {
       entity: "LINE_ITEM",
       entity_ids: batch.map((l) => l.id).join(","),
-      metric_groups: "BILLING,ENGAGEMENT",
+      metric_groups: "BILLING,ENGAGEMENT,WEB_CONVERSION",
       granularity: "DAY",
       placement: "ALL_ON_TWITTER",
       start_time: `${ymd(start)}T00:00:00Z`,
@@ -237,25 +302,30 @@ export async function fetchTwitterAdsets(
       const spendArr: (number | null)[] = m.billed_charge_local_micro ?? [];
       const imprArr: (number | null)[] = m.impressions ?? [];
       const clickArr: (number | null)[] = m.clicks ?? [];
+      const purchases: ConvMetric = m.conversion_purchases;
       for (let d = 0; d < dayCount; d++) {
         const day = new Date(start);
         day.setDate(start.getDate() + d);
         const spend = num(spendArr[d]) / 1_000_000;
         const impressions = num(imprArr[d]);
         const clicks = num(clickArr[d]);
-        if (spend === 0 && impressions === 0 && clicks === 0) continue;
+        const conversions = convCount(purchases, d);
+        const revenue = convSale(purchases, d);
+        if (spend === 0 && impressions === 0 && clicks === 0 && conversions === 0)
+          continue;
         out.push({
           campaignExternalId: li.campaignId,
           campaignName: campName.get(li.campaignId) ?? "(unknown)",
+          campaignStatus: campStatus.get(li.campaignId) ?? null,
           adsetExternalId: li.id,
           adsetName: li.name,
-          status: li.status,
+          status: normalizeAdStatus(li.status),
           date: ymd(day),
           spend,
           impressions,
           clicks,
-          conversions: 0,
-          revenue: 0,
+          conversions,
+          revenue,
         });
       }
     }

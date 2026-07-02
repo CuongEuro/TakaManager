@@ -177,6 +177,21 @@ function orderRevenue(o: OrderWithItems): number {
   return orderCollected(o) - orderTax(o);
 }
 
+/** Same formula on a MINIMAL order shape — exported so campaign attribution
+ *  (src/lib/attribution.ts) computes revenue identically to the P&L. */
+export function orderNetRevenue(o: {
+  grossRevenue: number;
+  discounts: number;
+  shippingCharged: number;
+  refunded: number;
+  store: { taxRate: number } | null;
+}): number {
+  return (
+    (o.grossRevenue - o.discounts + o.shippingCharged - o.refunded) *
+    (1 - (o.store?.taxRate ?? 0))
+  );
+}
+
 type FixedCostRow = {
   storeId: string | null;
   category: string;
@@ -401,6 +416,53 @@ export async function computeDashboard(
     catalogs,
     channelEfficiency,
   };
+}
+
+/** Per-store break-even ROAS over a window: the MER needed to cover variable
+ *  costs (revenue / grossProfit before ads & fixed), per store — so every ad
+ *  campaign is judged against ITS store's margin instead of one blended bar.
+ *  Stores with <5 orders (or non-positive gross) are omitted → caller falls
+ *  back to `blended`. Reuses the exact P&L math (orderRevenue/computeVariableA). */
+export async function computeStoreBreakEvens(
+  organizationId: string,
+  start: Date,
+  end: Date
+): Promise<{ blended: number; byStore: Map<string, number>; aov: number }> {
+  const [orders, rules] = await Promise.all([
+    prisma.order.findMany({
+      where: { organizationId, date: { gte: start, lt: end } },
+      include: {
+        lineItems: { include: { product: true } },
+        store: { select: { taxRate: true, cogsSource: true } },
+      },
+    }),
+    prisma.costRule.findMany({ where: { organizationId, active: true } }),
+  ]);
+
+  const be = (subset: OrderWithItems[]): number => {
+    const revenue = sum(subset, orderRevenue);
+    const gross = revenue - computeVariableA(subset, rules).total;
+    return gross > 0 ? revenue / gross : 0;
+  };
+
+  const blendedRaw = be(orders);
+  const blended = blendedRaw > 0 ? blendedRaw : 1.5; // sane floor when no data
+  const aov =
+    orders.length > 0 ? sum(orders, orderRevenue) / orders.length : 0;
+
+  const byStoreOrders = new Map<string, OrderWithItems[]>();
+  for (const o of orders) {
+    const arr = byStoreOrders.get(o.storeId);
+    if (arr) arr.push(o);
+    else byStoreOrders.set(o.storeId, [o]);
+  }
+  const byStore = new Map<string, number>();
+  for (const [sid, subset] of byStoreOrders) {
+    if (subset.length < 5) continue;
+    const v = be(subset);
+    if (v > 0) byStore.set(sid, v);
+  }
+  return { blended, byStore, aov };
 }
 
 /**

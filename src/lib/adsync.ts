@@ -82,7 +82,9 @@ function fetchAdsets(
   }
 }
 
-/** Upsert campaign+adset entities and their daily metrics. Returns adset count. */
+/** Upsert campaign+adset entities and their daily metrics. Returns adset count.
+ *  taxMultiplier: platform spend is pre-tax; store it tax-inclusive so the
+ *  optimize tree's ROAS matches AdSpend / the P&L. */
 async function syncHierarchy(
   account: {
     id: string;
@@ -90,13 +92,18 @@ async function syncHierarchy(
     storeId: string | null;
     platform: string;
   },
-  rows: AdsetInsight[]
+  rows: AdsetInsight[],
+  taxMultiplier: number
 ): Promise<number> {
   // 1) upsert campaign + adset entities
-  const campaigns = new Map<string, string>(); // externalId -> name
+  const campaigns = new Map<string, { name: string; status: string | null }>();
   const adsets = new Map<string, { name: string; parent: string; status: string | null }>();
   for (const r of rows) {
-    if (r.campaignExternalId) campaigns.set(r.campaignExternalId, r.campaignName);
+    if (r.campaignExternalId)
+      campaigns.set(r.campaignExternalId, {
+        name: r.campaignName,
+        status: r.campaignStatus,
+      });
     if (r.adsetExternalId)
       adsets.set(r.adsetExternalId, {
         name: r.adsetName,
@@ -105,7 +112,7 @@ async function syncHierarchy(
       });
   }
 
-  for (const [externalId, name] of campaigns) {
+  for (const [externalId, c] of campaigns) {
     await prisma.adEntity.upsert({
       where: { accountId_externalId: { accountId: account.id, externalId } },
       create: {
@@ -115,9 +122,11 @@ async function syncHierarchy(
         platform: account.platform,
         level: "CAMPAIGN",
         externalId,
-        name,
+        name: c.name,
+        status: c.status,
       },
-      update: { name },
+      // Never touch storeId here — it holds the user's campaign→store mapping.
+      update: { name: c.name, ...(c.status ? { status: c.status } : {}) },
     });
   }
 
@@ -161,24 +170,17 @@ async function syncHierarchy(
     const entityId = adsetIdMap.get(r.adsetExternalId);
     if (!entityId) continue;
     const date = new Date(`${r.date}T00:00:00`);
+    const metric = {
+      spend: r.spend * taxMultiplier,
+      impressions: r.impressions,
+      clicks: r.clicks,
+      conversions: r.conversions,
+      revenue: r.revenue,
+    };
     await prisma.adMetric.upsert({
       where: { entityId_date: { entityId, date } },
-      create: {
-        entityId,
-        date,
-        spend: r.spend,
-        impressions: r.impressions,
-        clicks: r.clicks,
-        conversions: r.conversions,
-        revenue: r.revenue,
-      },
-      update: {
-        spend: r.spend,
-        impressions: r.impressions,
-        clicks: r.clicks,
-        conversions: r.conversions,
-        revenue: r.revenue,
-      },
+      create: { entityId, date, ...metric },
+      update: metric,
     });
   }
   return adsets.size;
@@ -246,6 +248,10 @@ export async function syncAdAccount(
 
   try {
     const creds = toCreds(a);
+    // Platform spend is pre-tax; the real cost billed includes consumption/VAT.
+    // The SAME multiplier is applied to AdSpend and AdMetric so P&L and the
+    // optimize tree agree (JP default 10%).
+    const taxMultiplier = 1 + (a.taxRate ?? 0);
     // Campaign-level spend (light) — always pulled; retried on transient errors.
     const insights = await withRetry(() => fetchInsights(creds, since, until));
 
@@ -263,7 +269,8 @@ export async function syncAdAccount(
           storeId: a.storeId,
           platform: a.platform,
         },
-        adsetRows
+        adsetRows,
+        taxMultiplier
       );
     }
 
@@ -348,10 +355,6 @@ export async function syncAdAccount(
         });
       }
     }
-
-    // Platform spend is pre-tax; the real cost billed includes consumption/VAT.
-    // Apply the account's tax rate to the stored cost (JP default 10%).
-    const taxMultiplier = 1 + (a.taxRate ?? 0);
 
     // Rebuild this account's API rows for the window: delete then insert, so a
     // changed campaign→store mapping never leaves stale rows under the old store.

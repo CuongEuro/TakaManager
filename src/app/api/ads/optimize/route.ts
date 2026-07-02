@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveRange, RangePreset } from "@/lib/dates";
 import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
-import { computeDashboard } from "@/lib/pnl";
+import { computeStoreBreakEvens } from "@/lib/pnl";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -17,18 +17,22 @@ export async function GET(req: NextRequest) {
   const platform = sp.get("platform") || undefined;
   const range = resolveRange(preset);
 
-  const [tree, dash] = await Promise.all([
+  const [tree, bes] = await Promise.all([
     getAdTree(range, { organizationId: session.oid, storeId, platform }),
-    computeDashboard({
-      organizationId: session.oid,
-      start: range.start,
-      end: range.end,
-      storeId,
-    }),
+    computeStoreBreakEvens(session.oid, range.start, range.end),
   ]);
 
-  const breakEvenRoas = dash.summary.metrics.breakEvenRoas || 1.5;
-  const optimize = optimizeTree(tree, breakEvenRoas);
+  // Judge every campaign against ITS store's break-even (margins differ per
+  // store); the blended number remains the summary bar / fallback.
+  const breakEvenRoas =
+    (storeId ? bes.byStore.get(storeId) : undefined) ?? bes.blended;
+  const campaignBe = new Map<string, number>();
+  for (const c of tree.campaigns) {
+    const be = c.storeId ? bes.byStore.get(c.storeId) : undefined;
+    if (be) campaignBe.set(c.id, be);
+  }
+  const pauseMinSpend = Math.max(3000, Math.round(2 * bes.aov));
+  const optimize = optimizeTree(tree, breakEvenRoas, { campaignBe, pauseMinSpend });
 
   return NextResponse.json({
     preset,
@@ -36,6 +40,7 @@ export async function GET(req: NextRequest) {
     storeId: storeId ?? null,
     platform: platform ?? null,
     breakEvenRoas,
+    aov: bes.aov,
     tree,
     optimize,
   });

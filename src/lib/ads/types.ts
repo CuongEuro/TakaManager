@@ -15,15 +15,29 @@ export interface AdInsight {
 export interface AdsetInsight {
   campaignExternalId: string;
   campaignName: string;
+  campaignStatus: string | null; // normalized: ACTIVE | PAUSED | ARCHIVED
   adsetExternalId: string;
   adsetName: string;
-  status: string | null;
+  status: string | null; // normalized adset status
   date: string; // YYYY-MM-DD
   spend: number;
   impressions: number;
   clicks: number;
   conversions: number;
   revenue: number;
+}
+
+/** Map each platform's status vocabulary onto ACTIVE | PAUSED | ARCHIVED so
+ *  the optimizer never suggests pausing something that's already off.
+ *  Meta: ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED/ARCHIVED/DELETED...
+ *  Google: ENABLED/PAUSED/REMOVED. X: ACTIVE/PAUSED/DRAFT... */
+export function normalizeAdStatus(s: unknown): string | null {
+  if (!s) return null;
+  const v = String(s).toUpperCase();
+  if (v === "ENABLED" || v === "ACTIVE") return "ACTIVE";
+  if (v.includes("PAUSED")) return "PAUSED";
+  if (v === "ARCHIVED" || v === "REMOVED" || v === "DELETED") return "ARCHIVED";
+  return v;
 }
 
 // Credentials/config for one ad account (subset of the AdAccount model).

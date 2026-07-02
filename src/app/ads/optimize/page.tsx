@@ -31,6 +31,8 @@ const ACTION_TONE: Record<Action, "green" | "blue" | "amber" | "rose" | "slate">
   REDUCE: "amber",
   PAUSE: "rose",
   REVIEW: "slate",
+  NO_DATA: "amber",
+  OFF: "slate",
 };
 
 export default function OptimizePage() {
@@ -227,10 +229,26 @@ export default function OptimizePage() {
                     <span className="flex-1 font-semibold text-slate-800">
                       {c.name}
                       <span className="ml-2 text-xs font-normal text-slate-400">
-                        {c.adsets.length} adset
+                        {c.dataLevel === "campaign"
+                          ? "chỉ số campaign (chưa có adset)"
+                          : `${c.adsets.length} adset`}
                       </span>
+                      {(c.status === "PAUSED" || c.status === "ARCHIVED") && (
+                        <span className="ml-2 text-xs font-normal text-slate-400">
+                          (đã tắt)
+                        </span>
+                      )}
+                      {/* Judged vs its OWN store's break-even when it differs */}
+                      {reco &&
+                        Math.abs(reco.breakEven - data.breakEvenRoas) /
+                          data.breakEvenRoas >
+                          0.05 && (
+                          <span className="ml-2 text-xs font-normal text-slate-400">
+                            HV {formatMultiplier(reco.breakEven)}
+                          </span>
+                        )}
                     </span>
-                    <KpiInline k={c} be={data.breakEvenRoas} />
+                    <KpiInline k={c} be={reco?.breakEven ?? data.breakEvenRoas} />
                     {reco && <Badge tone={ACTION_TONE[reco.action]}>{ACTION_LABELS[reco.action]}</Badge>}
                   </button>
 
@@ -258,7 +276,7 @@ export default function OptimizePage() {
                                     <span className="ml-2 text-xs text-slate-400">(đang tắt)</span>
                                   )}
                                 </span>
-                                <KpiInline k={a} be={data.breakEvenRoas} />
+                                <KpiInline k={a} be={ar?.breakEven ?? data.breakEvenRoas} />
                                 {ar && (
                                   <Badge tone={ACTION_TONE[ar.action]}>
                                     {ACTION_LABELS[ar.action]}
@@ -296,6 +314,9 @@ function KpiInline({ k, be }: { k: AdsetNode | CampaignNode; be: number }) {
         }`}
       >
         ROAS {formatMultiplier(k.roas)}
+      </span>
+      <span title={`CPC ${formatJPY(k.cpc)} · CPM ${formatJPY(k.cpm)}`}>
+        CPA {k.conversions > 0 ? formatJPY(k.cpa) : "—"}
       </span>
       <span>CTR {formatPercent(k.ctr)}</span>
       <span>CVR {formatPercent(k.cvr)}</span>
