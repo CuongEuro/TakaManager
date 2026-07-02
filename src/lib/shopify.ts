@@ -391,13 +391,15 @@ query ProductCosts($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on Product {
       id
-      variants(first: 1) { nodes { inventoryItem { unitCost { amount } } } }
+      variants(first: 10) { nodes { inventoryItem { unitCost { amount } } } }
     }
   }
 }`;
 
-/** Fetch each product's "Cost per item" (first variant's inventoryItem.unitCost),
- *  batched by 100. Requires the read_inventory scope. */
+/** Fetch each product's "Cost per item": scan the first 10 variants and take
+ *  the first cost > 0 — POD variants usually share one cost, but variant #1
+ *  alone may have none, which used to lose the whole product. Batched by 25 to
+ *  stay under Shopify's 1,000-point query cost cap. Needs read_inventory. */
 export async function fetchProductCosts(
   creds: ShopifyCreds,
   productGids: string[]
@@ -405,8 +407,8 @@ export async function fetchProductCosts(
   const out = new Map<string, number>();
   if (productGids.length === 0) return out;
   const c = await resolveCreds(creds);
-  for (let i = 0; i < productGids.length; i += 100) {
-    const ids = productGids.slice(i, i + 100);
+  for (let i = 0; i < productGids.length; i += 25) {
+    const ids = productGids.slice(i, i + 25);
     const data = await shopifyGraphQL<{
       nodes: ({
         id: string;
@@ -416,8 +418,14 @@ export async function fetchProductCosts(
       } | null)[];
     }>(c, PRODUCT_COSTS_QUERY, { ids });
     for (const n of data.nodes) {
-      const cost = num(n?.variants?.nodes?.[0]?.inventoryItem?.unitCost?.amount);
-      if (n?.id && cost > 0) out.set(n.id, cost);
+      if (!n?.id) continue;
+      for (const v of n.variants?.nodes ?? []) {
+        const cost = num(v?.inventoryItem?.unitCost?.amount);
+        if (cost > 0) {
+          out.set(n.id, cost);
+          break;
+        }
+      }
     }
   }
   return out;

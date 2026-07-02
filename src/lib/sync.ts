@@ -20,6 +20,7 @@ import {
   ShopifyCreds,
   ShopifyOrderNorm,
 } from "@/lib/shopify";
+import { customRange, DEFAULT_TZ } from "@/lib/dates";
 
 export interface SyncResult {
   storeId: string;
@@ -366,29 +367,59 @@ export interface CostSyncResult {
   ok: boolean;
   storeId: string;
   storeName: string;
-  products: number; // products whose cost was fetched
+  products: number; // distinct products found in the window's orders
+  withCost: number; // of those, how many have a Cost per item on Shopify
   updated: number; // line items patched
   error?: string;
 }
 
 /** Refresh "Cost per item" for a store: fetch each product's current cost from
  *  Shopify and patch OrderLineItem.unitCost for that store's orders in the
- *  window. Cheap vs a full order re-sync (products « orders). */
+ *  window. Cheap vs a full order re-sync (products « orders).
+ *
+ *  Window: prefer fromYMD/toYMD (calendar days resolved in the STORE's
+ *  timezone — same day boundaries the dashboard uses). The old since/until
+ *  instants used server-local setHours(), which on Vercel (UTC) covered only
+ *  part of a JST day — a picked day looked like "no costs found". */
 export async function syncStoreCosts(
   storeId: string,
   organizationId: string,
-  opts: { since?: Date; until?: Date; sinceDays?: number } = {}
+  opts: {
+    since?: Date;
+    until?: Date;
+    sinceDays?: number;
+    fromYMD?: string;
+    toYMD?: string;
+  } = {}
 ): Promise<CostSyncResult> {
   const { store, creds } = await storeCreds(storeId, organizationId);
-  const base = { storeId, storeName: store?.name ?? storeId, products: 0, updated: 0 };
+  const base = {
+    storeId,
+    storeName: store?.name ?? storeId,
+    products: 0,
+    withCost: 0,
+    updated: 0,
+  };
   if (!creds)
     return { ...base, ok: false, error: "Thiếu Shopify domain hoặc khoá kết nối." };
 
-  const since = resolveSince(opts, store!.lastSyncedAt);
-  const winStart = new Date(since);
-  winStart.setHours(0, 0, 0, 0);
-  const winEnd = opts.until ? new Date(opts.until) : new Date();
-  winEnd.setHours(23, 59, 59, 999);
+  let winStart: Date;
+  let winEnd: Date; // exclusive
+  if (opts.fromYMD && opts.toYMD) {
+    const tz = store?.timezone || DEFAULT_TZ;
+    const r = customRange(opts.fromYMD, opts.toYMD, tz);
+    winStart = r.start;
+    winEnd = r.end;
+  } else {
+    const since = resolveSince(opts, store!.lastSyncedAt);
+    // Legacy instant window: pad a day each side so timezone offsets between
+    // the server (UTC) and the store never clip the intended days.
+    winStart = new Date(since.getTime() - 86400000);
+    winEnd = opts.until
+      ? new Date(opts.until.getTime() + 86400000)
+      : new Date();
+  }
+  const dateWindow = { gte: winStart, lt: winEnd };
 
   try {
     // Distinct products that appear in this store's orders in the window.
@@ -396,10 +427,12 @@ export async function syncStoreCosts(
       by: ["productId"],
       where: {
         productId: { not: null },
-        order: { storeId, date: { gte: winStart, lte: winEnd } },
+        order: { storeId, date: dateWindow },
       },
     });
     const pids = grouped.map((g) => g.productId).filter((x): x is string => !!x);
+    // No orders in the window → nothing to patch (the UI turns products:0
+    // into a "sync orders first" hint).
     if (pids.length === 0) return { ...base, ok: true };
 
     const products = await prisma.product.findMany({
@@ -416,12 +449,31 @@ export async function syncStoreCosts(
       const cost = p.externalId ? costMap.get(p.externalId) : undefined;
       if (cost == null || cost <= 0) continue;
       const res = await prisma.orderLineItem.updateMany({
-        where: { productId: p.id, order: { storeId, date: { gte: winStart, lte: winEnd } } },
+        where: { productId: p.id, order: { storeId, date: dateWindow } },
         data: { unitCost: cost },
       });
       updated += res.count;
     }
-    return { ...base, ok: true, products: products.length, updated };
+    // Products found but Shopify returned no cost for ANY of them → almost
+    // certainly "Cost per item" isn't filled in (or the token predates the
+    // read_inventory grant). Surface that instead of a silent "0 updated".
+    if (products.length > 0 && costMap.size === 0)
+      return {
+        ...base,
+        ok: false,
+        products: products.length,
+        error:
+          `Shopify không trả về Cost per item cho sản phẩm nào (${products.length} sản phẩm). ` +
+          "Kiểm tra: (1) đã nhập 'Cost per item' cho variant trong Shopify Admin, " +
+          "(2) app có scope read_inventory và đã cài lại lên store.",
+      };
+    return {
+      ...base,
+      ok: true,
+      products: products.length,
+      withCost: costMap.size,
+      updated,
+    };
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
     if (/inventory|unitCost|InventoryItem/i.test(m))

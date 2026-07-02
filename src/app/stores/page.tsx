@@ -50,6 +50,14 @@ function fmtDate(iso?: string) {
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
 }
 
+// Calendar date (YYYY-MM-DD) as shown in the picker — the server resolves it
+// in the store's timezone, so a picked day means that store-local day.
+function ymd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
 // Unknown total → asymptotic bar that approaches (but never hits) `cap` by page.
 function pagePct(page: number, cap = 92): number {
   return Math.min(cap, Math.round(cap * (1 - Math.pow(0.78, page))));
@@ -122,6 +130,9 @@ interface MonthChunk {
  *  stable across presets, so a month synced once can be skipped on re-run. */
 function buildMonthChunks(from: Date, to: Date): MonthChunk[] {
   const chunks: MonthChunk[] = [];
+  // `to` is the picker's local MIDNIGHT of the last day — bound chunks by the
+  // END of that day, or the last day's orders would be excluded entirely.
+  const toEnd = new Date(to.getTime() + 86400000 - 1);
   let y = from.getFullYear();
   let m = from.getMonth();
   const endY = to.getFullYear();
@@ -132,8 +143,8 @@ function buildMonthChunks(from: Date, to: Date): MonthChunk[] {
     chunks.push({
       key: `${y}-${String(m + 1).padStart(2, "0")}`,
       since: monthStart < from ? from : monthStart,
-      until: monthEnd > to ? to : monthEnd,
-      fullMonth: from <= monthStart && to >= monthEnd,
+      until: monthEnd > toEnd ? toEnd : monthEnd,
+      fullMonth: from <= monthStart && toEnd >= monthEnd,
     });
     if (++m > 11) {
       m = 0;
@@ -367,8 +378,13 @@ async function syncStoreRefunds(
   let cursor: string | null = null;
   let updated = 0;
   let scanned = 0;
-  const sinceStr = from.toISOString();
-  const untilStr = to.toISOString();
+  // `from`/`to` are local midnights of the picked days: `to` alone would STOP
+  // at 00:00 of the last day (skipping it entirely). Cover the whole last day
+  // (+24h) and pad a day each side for browser↔store timezone offsets — the
+  // patch is idempotent, so scanning slightly wider is harmless.
+  const DAY = 86400000;
+  const sinceStr = new Date(from.getTime() - DAY).toISOString();
+  const untilStr = new Date(to.getTime() + 2 * DAY).toISOString();
   for (let page = 1; page <= 8000; page++) {
     const body: Record<string, unknown> = cursor
       ? { storeId, since: sinceStr, until: untilStr, cursor }
@@ -648,6 +664,9 @@ export default function StoresPage() {
     try {
       const { from, to } = range;
       let updated = 0;
+      let products = 0;
+      let withCost = 0;
+      const errors: string[] = [];
       const n = targets.length;
       for (let i = 0; i < n; i++) {
         const s = targets[i];
@@ -661,26 +680,35 @@ export default function StoresPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               storeId: s.id,
-              since: from.toISOString(),
-              until: to.toISOString(),
+              // Calendar days — the server maps them to the store's timezone.
+              from: ymd(from),
+              to: ymd(to),
             }),
           }).then((x) => x.json());
+          products += r.products ?? 0;
+          withCost += r.withCost ?? 0;
           if (r.ok) updated += r.updated ?? 0;
-          else setMsg({ id: "ALL", ok: false, text: `⚠️ ${s.name}: ${r.error}` });
+          else errors.push(`${s.name}: ${r.error}`);
         } catch (e) {
-          setMsg({
-            id: "ALL",
-            ok: false,
-            text: `⚠️ ${s.name}: ${e instanceof Error ? e.message : String(e)}`,
-          });
+          errors.push(`${s.name}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
       setProgress({ percent: 100, message: "Hoàn tất" });
-      setMsg({
-        id: "ALL",
-        ok: true,
-        text: `✓ Đã cập nhật giá vốn cho ${updated} dòng đơn (${rangeLabel()}).`,
-      });
+      if (errors.length > 0) {
+        setMsg({ id: "ALL", ok: false, text: `⚠️ ${errors.join(" · ")}` });
+      } else if (products === 0) {
+        setMsg({
+          id: "ALL",
+          ok: false,
+          text: `✗ Không có đơn hàng nào ${rangeLabel()} — hãy Đồng bộ đơn cho khoảng này trước, rồi bấm Cập nhật giá vốn.`,
+        });
+      } else {
+        setMsg({
+          id: "ALL",
+          ok: true,
+          text: `✓ Đã cập nhật giá vốn cho ${updated} dòng đơn — ${withCost}/${products} sản phẩm có Cost per item (${rangeLabel()}).`,
+        });
+      }
       await load();
     } finally {
       setBusy(null);
