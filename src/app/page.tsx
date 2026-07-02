@@ -26,6 +26,14 @@ interface DashboardResponse extends DashboardData {
   timezone: string;
 }
 
+// Human labels for the COGS-source breakdown (PnlResult.variableA.cogsBy).
+const COGS_SOURCE_LABELS: Record<string, string> = {
+  UNIT_COST: "từ Cost per item (Shopify)",
+  RULE_PCT: "từ quy tắc % Biến đổi A",
+  RULE_PER_ORDER: "từ quy tắc mỗi đơn",
+  BASE_COST: "từ baseCost sản phẩm / quy tắc mỗi cái",
+};
+
 // Calendar date (YYYY-MM-DD) in local tz — matches what the picker shows.
 const dayStr = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
@@ -247,12 +255,30 @@ export default function DashboardPage() {
                   Biến đổi A (Sản xuất)
                 </div>
                 {Object.entries(s.variableA.byType).map(([k, v]) => (
-                  <PnlRow
-                    key={k}
-                    label={`${COST_RULE_TYPE_LABELS[k] ?? k} (${pctOfCollected(v)})`}
-                    value={-v}
-                    negative
-                  />
+                  <div key={k}>
+                    <PnlRow
+                      label={`${COST_RULE_TYPE_LABELS[k] ?? k} (${pctOfCollected(v)})`}
+                      value={-v}
+                      negative
+                    />
+                    {/* COGS: show WHERE it comes from — an inflated number is
+                        usually 2 % rules stacking or an unexpected source. */}
+                    {k === "COGS" && (
+                      <>
+                        {Object.entries(s.variableA.cogsBy).map(([src, sv]) => (
+                          <PnlSub
+                            key={src}
+                            label={`— ${COGS_SOURCE_LABELS[src] ?? src}${
+                              src === "RULE_PCT" && s.variableA.cogsPctRuleCount > 1
+                                ? ` — ⚠ ${s.variableA.cogsPctRuleCount} quy tắc % đang CỘNG DỒN`
+                                : ""
+                            } (${pctOfCollected(sv)})`}
+                            value={-sv}
+                          />
+                        ))}
+                      </>
+                    )}
+                  </div>
                 ))}
                 <PnlRow
                   label={`Tổng biến đổi A (${pctOfCollected(s.variableA.total)})`}

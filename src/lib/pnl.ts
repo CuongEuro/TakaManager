@@ -27,7 +27,16 @@ export interface RevenueBlock {
 export interface PnlResult {
   revenue: RevenueBlock;
   orders: { count: number; units: number; aov: number };
-  variableA: { total: number; byType: Record<string, number> };
+  variableA: {
+    total: number;
+    byType: Record<string, number>;
+    // COGS split by SOURCE — makes an inflated COGS self-explanatory:
+    // UNIT_COST (Shopify Cost per item), RULE_PCT (% rules — cogsPctRuleCount
+    // of them; >1 means rules are STACKING), RULE_PER_ORDER, BASE_COST
+    // (product.baseCost / per-unit rules).
+    cogsBy: Record<string, number>;
+    cogsPctRuleCount: number;
+  };
   variableB: {
     total: number;
     byPlatform: Record<string, number>;
@@ -206,6 +215,13 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
   const add = (type: string, v: number) => {
     byType[type] = (byType[type] ?? 0) + v;
   };
+  // Where COGS actually comes from (see PnlResult.variableA.cogsBy).
+  const cogsBy: Record<string, number> = {};
+  const addCogs = (source: string, v: number) => {
+    add("COGS", v);
+    cogsBy[source] = (cogsBy[source] ?? 0) + v;
+  };
+  const cogsPctRulesApplied = new Set<Rule>();
 
   const activeRules = rules.filter((r) => r.active);
   const cogsPerUnitRules = activeRules.filter(
@@ -230,7 +246,7 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
     if (useShopifyCost) {
       // COGS straight from Shopify "Cost per item" × quantity.
       for (const li of o.lineItems) {
-        if (li.unitCost > 0) add("COGS", li.unitCost * li.quantity);
+        if (li.unitCost > 0) addCogs("UNIT_COST", li.unitCost * li.quantity);
       }
     } else if (!hasOrderLevelCogs) {
       // RULE mode with no order-level COGS rule → per-unit COGS (product.baseCost
@@ -245,7 +261,7 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
           );
           unitCost = rule ? rule.amount : 0;
         }
-        if (unitCost > 0) add("COGS", unitCost * li.quantity);
+        if (unitCost > 0) addCogs("BASE_COST", unitCost * li.quantity);
       }
     }
 
@@ -257,7 +273,8 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
       if (r.storeId !== null && r.storeId !== o.storeId) continue;
 
       if (r.calcMethod === "PER_ORDER") {
-        add(r.type, r.amount);
+        if (r.type === "COGS") addCogs("RULE_PER_ORDER", r.amount);
+        else add(r.type, r.amount);
       } else if (r.calcMethod === "PER_UNIT") {
         const u =
           r.productId === null
@@ -273,13 +290,18 @@ function computeVariableA(orders: OrderWithItems[], rules: Rule[]) {
             : o.lineItems
                 .filter((li) => li.productId === r.productId)
                 .reduce((s, li) => s + li.price * li.quantity, 0);
-        add(r.type, r.amount * base);
+        if (r.type === "COGS") {
+          addCogs("RULE_PCT", r.amount * base);
+          cogsPctRulesApplied.add(r);
+        } else {
+          add(r.type, r.amount * base);
+        }
       }
     }
   }
 
   const total = Object.values(byType).reduce((s, v) => s + v, 0);
-  return { total, byType };
+  return { total, byType, cogsBy, cogsPctRuleCount: cogsPctRulesApplied.size };
 }
 
 // --- main -----------------------------------------------------------------
