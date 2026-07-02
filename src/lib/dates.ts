@@ -4,6 +4,7 @@
 export type RangePreset =
   | "today"
   | "yesterday"
+  | "last3"
   | "last7"
   | "thisWeek"
   | "thisMonth"
@@ -13,6 +14,7 @@ export type RangePreset =
 export const RANGE_PRESET_LABELS: Record<RangePreset, string> = {
   today: "Hôm nay",
   yesterday: "Hôm qua",
+  last3: "3 ngày",
   last7: "7 ngày",
   thisWeek: "Tuần này",
   thisMonth: "Tháng này",
@@ -94,6 +96,10 @@ export function resolveRange(
     case "yesterday":
       startC = cAdd(carrier, -1);
       endC = carrier;
+      break;
+    case "last3":
+      startC = cAdd(carrier, -2);
+      endC = cAdd(carrier, 1);
       break;
     case "last7":
       startC = cAdd(carrier, -6);

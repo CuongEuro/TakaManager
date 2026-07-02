@@ -41,7 +41,13 @@ interface OptimizeResponse {
   attribution: AttributionInfo;
 }
 
-const PRESETS: RangePreset[] = ["last7", "thisMonth", "last30", "lastMonth"];
+const PRESETS: RangePreset[] = [
+  "today",
+  "yesterday",
+  "last3",
+  "last7",
+  "last30",
+];
 
 interface AlertRow {
   id: string;
@@ -121,6 +127,8 @@ export default function OptimizePage() {
     "all"
   );
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 20;
   // "Cập nhật Ads" — sync latest ad data (incl. campaign status for the filter).
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
@@ -190,6 +198,11 @@ export default function OptimizePage() {
       })
       .finally(() => setLoading(false));
   }, [preset, storeId, platform, reloadTick]);
+
+  // Any filter/data change restarts pagination at page 1.
+  useEffect(() => {
+    setPage(1);
+  }, [actionFilter, statusFilter, preset, storeId, platform, reloadTick]);
 
   // Sync the latest ad data (campaign spend + STATUS, over the visible window)
   // for every active/configured account, then reload the tree. Light sync
@@ -298,6 +311,14 @@ export default function OptimizePage() {
   const allVisibleSelected =
     visibleCampaigns.length > 0 &&
     visibleCampaigns.every((c) => selected.has(c.id));
+
+  // Pagination over the filtered list.
+  const totalPages = Math.max(1, Math.ceil(visibleCampaigns.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedCampaigns = visibleCampaigns.slice(
+    (safePage - 1) * PAGE_SIZE,
+    safePage * PAGE_SIZE
+  );
 
   return (
     <div>
@@ -721,7 +742,7 @@ export default function OptimizePage() {
             {visibleCampaigns.length === 0 ? (
               <EmptyState message="Không có campaign nào khớp bộ lọc." />
             ) : (
-              visibleCampaigns.map((c) => {
+              pagedCampaigns.map((c) => {
               const reco = recoMap.get(c.id) as Reco | undefined;
               const isOpen = open.has(c.id);
               const checked = selected.has(c.id);
@@ -843,6 +864,36 @@ export default function OptimizePage() {
               })
             )}
           </div>
+
+          {/* Pagination */}
+          {visibleCampaigns.length > PAGE_SIZE && (
+            <div className="flex items-center justify-between text-sm text-slate-500">
+              <span>
+                {(safePage - 1) * PAGE_SIZE + 1}–
+                {Math.min(safePage * PAGE_SIZE, visibleCampaigns.length)} /{" "}
+                {visibleCampaigns.length} campaign
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  ← Trước
+                </Button>
+                <span className="text-xs">
+                  Trang {safePage}/{totalPages}
+                </span>
+                <Button
+                  variant="secondary"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  Sau →
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
