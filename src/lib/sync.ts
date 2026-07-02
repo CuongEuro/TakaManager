@@ -361,6 +361,51 @@ export async function syncStoreRefundsPage(
   }
 }
 
+/** Scan ALL refunded orders whose updated_at falls in the last `sinceDays`
+ *  days and patch `refunded`/tax. A refund bumps the order's updated_at, so
+ *  this catches fresh refunds even on months-old orders — the hourly
+ *  auto-refresh uses it (small window → a page or two, fits a serverless
+ *  call, no client paging loop needed). */
+export async function syncStoreRefundsWindow(
+  storeId: string,
+  organizationId: string,
+  opts: { sinceDays?: number } = {}
+): Promise<{ ok: boolean; storeName: string; updated: number; scanned: number; error?: string }> {
+  const { store, creds } = await storeCreds(storeId, organizationId);
+  const storeName = store?.name ?? storeId;
+  if (!creds)
+    return { ok: false, storeName, updated: 0, scanned: 0, error: "Thiếu khoá kết nối." };
+
+  const since = daysAgo(opts.sinceDays ?? 2);
+  try {
+    let cursor: string | null = null;
+    let updated = 0;
+    let scanned = 0;
+    for (let page = 0; page < 30; page++) {
+      const p = await fetchRefundsPage(creds, since, undefined, cursor, true);
+      scanned += p.refunds.length;
+      for (const r of p.refunds) {
+        const res = await prisma.order.updateMany({
+          where: { storeId, externalId: r.externalId },
+          data: { refunded: r.refunded, tax: r.tax },
+        });
+        updated += res.count; // 0 if the order isn't in our DB (skip)
+      }
+      if (!p.hasNext) break;
+      cursor = p.nextCursor;
+    }
+    return { ok: true, storeName, updated, scanned };
+  } catch (e) {
+    return {
+      ok: false,
+      storeName,
+      updated: 0,
+      scanned: 0,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 // --- cost-only sync (patch line-item unit costs, no order re-pull) ----------
 
 export interface CostSyncResult {

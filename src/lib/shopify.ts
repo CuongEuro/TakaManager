@@ -540,15 +540,23 @@ export interface RefundsPage {
 
 /** One page of REFUNDED orders in [since, until] — only their id + refunded
  *  amount + current tax. Filters to (partially) refunded orders so we scan a
- *  small subset instead of every order. */
+ *  small subset instead of every order.
+ *  byUpdated=true windows on updated_at instead of created_at — a refund BUMPS
+ *  the order's updated_at, so a short updated_at window catches fresh refunds
+ *  even on months-old orders (used by the hourly auto-refresh). */
 export async function fetchRefundsPage(
   creds: ShopifyCreds,
   since: Date,
   until: Date | undefined,
-  cursor: string | null = null
+  cursor: string | null = null,
+  byUpdated = false
 ): Promise<RefundsPage> {
   const c = await resolveCreds(creds);
-  const queryStr = `${orderRangeQuery(since, until)} (financial_status:refunded OR financial_status:partially_refunded)`;
+  const refundFilter =
+    "(financial_status:refunded OR financial_status:partially_refunded)";
+  const queryStr = byUpdated
+    ? `updated_at:>=${since.toISOString()} status:any ${refundFilter}`
+    : `${orderRangeQuery(since, until)} ${refundFilter}`;
   const data = await shopifyGraphQL<{
     orders: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };

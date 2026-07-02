@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import type { DashboardData } from "@/lib/pnl";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
 import {
@@ -103,6 +104,24 @@ export default function DashboardPage() {
     const id = setInterval(check, 5 * 60_000);
     return () => clearInterval(id);
   }, [doAdsRefresh, range]);
+
+  // Hourly Shopify refresh (returns + Cost per item, last 2 days by
+  // updated_at) — same cadence as ads. Runs for ANY viewed range: a refund
+  // issued today changes the ORDER's day, so historical views benefit too.
+  const doShopifyRefresh = useCallback(async () => {
+    try {
+      const r = await fetch("/api/shopify/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }).then((x) => x.json());
+      if ((r.refundsUpdated ?? 0) > 0 || (r.costsUpdated ?? 0) > 0)
+        setData(await loadDashboard());
+    } catch {
+      /* ignore — dashboard still shows last-synced values */
+    }
+  }, [loadDashboard]);
+  useAutoRefresh("taka:shopify-last-refresh", doShopifyRefresh);
 
   const refreshAdsNow = () => doAdsRefresh(true);
 

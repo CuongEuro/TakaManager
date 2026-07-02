@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
 import { useResource } from "@/hooks/useResource";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import {
   PageHeader,
   Card,
@@ -443,6 +444,22 @@ export default function StoresPage() {
   }));
   // Bỏ qua các tháng đã đồng bộ trước đó (resume). Tắt = kéo lại từ đầu.
   const [skipSynced, setSkipSynced] = useState(true);
+
+  // Hourly auto-refresh of returns + Cost per item (last 2 days). Shares the
+  // localStorage key with the Dashboard so only one of the two pages fires.
+  const autoRefresh = useCallback(async () => {
+    try {
+      await fetch("/api/shopify/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      await load();
+    } catch {
+      /* silent — the manual buttons still work */
+    }
+  }, [load]);
+  useAutoRefresh("taka:shopify-last-refresh", autoRefresh);
 
   function rangeLabel(): string {
     return `từ ${fmtDate(range.from.toISOString())} đến ${fmtDate(
@@ -904,6 +921,11 @@ export default function StoresPage() {
             khoảng ngày đã chọn (không kéo toàn bộ catalog) → nhanh & nhẹ. Giá vốn
             (COGS): chọn <b>Nguồn COGS</b> ở bảng dưới — theo quy tắc <b>Biến đổi A</b>{" "}
             hoặc theo <b>Cost per item</b> của Shopify.
+          </p>
+          <p>
+            🕐 <b>Hoàn hàng</b> và <b>giá vốn</b> tự động cập nhật <b>mỗi 1 tiếng</b>{" "}
+            (2 ngày gần nhất, refund của đơn cũ cũng được bắt) khi đang mở app. Hai nút{" "}
+            <b>↩️ / 💰</b> chỉ cần dùng khi muốn cập nhật cho khoảng ngày xa hơn.
           </p>
           <p>
             🔒 Muốn biết đơn đến từ kênh nào (Facebook/Google/Klaviyo...), bật thêm{" "}

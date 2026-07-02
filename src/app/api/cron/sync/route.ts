@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { syncAllAdAccounts } from "@/lib/adsync";
-import { syncAllStores } from "@/lib/sync";
+import { syncAllStores, syncStoreRefundsWindow } from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // Hobby caps at 60s; light 7-day window keeps it short
@@ -34,6 +34,13 @@ async function handle(req: NextRequest) {
     const storeResults = await syncAllStores(org.id, { sinceDays: 7 });
     stores += storeResults.length;
     storeOk += storeResults.filter((r) => r.ok).length;
+
+    // Refunds by updated_at: the order re-sync above only covers orders
+    // CREATED in the window — this also catches refunds issued recently on
+    // OLD orders (a refund bumps updated_at).
+    for (const r of storeResults) {
+      if (r.ok) await syncStoreRefundsWindow(r.storeId, org.id, { sinceDays: 7 });
+    }
   }
   return NextResponse.json({
     ok: true,
