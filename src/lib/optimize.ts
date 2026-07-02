@@ -4,7 +4,7 @@
 // Deterministic; works without any AI key. ROAS is judged vs break-even —
 // per-campaign break-even (its store's margin) when available.
 // ---------------------------------------------------------------------------
-import { AdTree, Kpis } from "@/lib/adinsights";
+import { AdTree, CampaignNode, Kpis, Trend } from "@/lib/adinsights";
 import { formatJPY, formatMultiplier, formatPercent } from "@/lib/format";
 
 export type Action =
@@ -36,13 +36,26 @@ export interface Reco {
   roas: number;
   spend: number;
   breakEven: number; // the bar this entity was judged against
+  usedRealRoas?: boolean; // judged on Shopify revenue instead of platform's
+  trendFlags?: string[];
   reasons: string[];
+}
+
+/** One concrete budget move: shift ~¥X/day from losing entities to a winner. */
+export interface BudgetMove {
+  platform: string;
+  from: string[]; // source campaign names (PAUSE / REDUCE)
+  to: string;
+  toId: string;
+  dailyAmount: number; // ¥/day to move
+  estDailyProfit: number; // conservative estimate
 }
 
 export interface OptimizeResult {
   breakEvenRoas: number;
   recommendations: Reco[];
   counts: Record<Action, number>;
+  budgetPlan: BudgetMove[];
 }
 
 const DEFAULT_MIN_SPEND = 3000; // ¥ over the range — below this we can't judge
@@ -136,6 +149,40 @@ function evaluate(
   return { action, priority, reasons };
 }
 
+/** Apply trend context to a base evaluation: don't scale into a decline,
+ *  warn early when a KEEP is sliding, surface creative fatigue. */
+function applyTrend(
+  e: { action: Action; priority: number; reasons: string[] },
+  trend: Trend | null | undefined
+): { action: Action; priority: number; reasons: string[] } {
+  if (!trend) return e;
+  const flags = trend.flags;
+  if (flags.includes("WORSENING")) {
+    const pct = formatPercent(Math.abs(trend.roasDelta));
+    if (e.action === "SCALE") {
+      e.action = "KEEP";
+      e.priority = 2;
+      e.reasons.unshift(
+        `Hoãn scale: ROAS đang giảm ${pct} so với nửa kỳ trước — giữ ngân sách, chờ ổn định.`
+      );
+    } else if (e.action === "KEEP") {
+      e.action = "REDUCE";
+      e.priority = 2;
+      e.reasons.unshift(
+        `Cảnh báo sớm: ROAS giảm ${pct} so với nửa kỳ trước — giảm nhẹ ngân sách trước khi lỗ.`
+      );
+    }
+  }
+  if (flags.includes("FATIGUE")) {
+    e.reasons.push(
+      `😴 CTR giảm ${formatPercent(
+        Math.abs(trend.ctrDelta)
+      )} với spend giữ nguyên — creative mệt mỏi, chuẩn bị mẫu mới.`
+    );
+  }
+  return e;
+}
+
 export function optimizeTree(
   tree: AdTree,
   breakEvenRoas: number,
@@ -145,6 +192,9 @@ export function optimizeTree(
     pauseMinSpend?: number;
     /** Per-campaign break-even (campaign id → its store's BE). */
     campaignBe?: Map<string, number>;
+    /** UTM match rate per platform — ≥ 0.6 → judge campaigns on REAL
+     *  (Shopify) ROAS instead of the platform's self-reported one. */
+    matchRateByPlatform?: Record<string, number>;
   } = {}
 ): OptimizeResult {
   const blended = breakEvenRoas > 0 ? breakEvenRoas : 1;
@@ -172,6 +222,13 @@ export function optimizeTree(
     const noConvData = noConvPlatforms.has(c.platform);
     const campaignOff = isOff(c.status);
 
+    // Judge on REAL Shopify ROAS when the platform's UTM match rate is good —
+    // platform-reported revenue over-attributes (view-through, long windows).
+    const usedRealRoas =
+      c.realRoas != null &&
+      (opts.matchRateByPlatform?.[c.platform] ?? 0) >= 0.6;
+    const judged: Kpis = usedRealRoas ? { ...c, roas: c.realRoas! } : c;
+
     let ce: { action: Action; priority: number; reasons: string[] };
     if (campaignOff) {
       ce = {
@@ -180,7 +237,16 @@ export function optimizeTree(
         reasons: ["Campaign đã tắt trên nền tảng — không cần hành động."],
       };
     } else {
-      ce = evaluate(c, be, minSpend, pauseMinSpend, noConvData);
+      ce = applyTrend(
+        evaluate(judged, be, minSpend, pauseMinSpend, noConvData),
+        c.trend
+      );
+      if (usedRealRoas)
+        ce.reasons.push(
+          `Chấm theo ROAS Shopify ${formatMultiplier(
+            c.realRoas!
+          )} (nền tảng tự báo ${formatMultiplier(c.roas)}).`
+        );
 
       // structural hint: budget reallocation when adsets diverge
       const scalers = c.adsets.filter(
@@ -205,6 +271,8 @@ export function optimizeTree(
       roas: c.roas,
       spend: c.spend,
       breakEven: be,
+      usedRealRoas,
+      trendFlags: c.trend?.flags,
       reasons: ce.reasons,
     });
 
@@ -220,7 +288,10 @@ export function optimizeTree(
                   : "Adset đã tắt trên nền tảng — không cần hành động.",
               ],
             }
-          : evaluate(a, be, minSpend, pauseMinSpend, noConvData);
+          : applyTrend(
+              evaluate(a, be, minSpend, pauseMinSpend, noConvData),
+              a.trend
+            );
       recs.push({
         level: "ADSET",
         id: a.id,
@@ -231,6 +302,7 @@ export function optimizeTree(
         roas: a.roas,
         spend: a.spend,
         breakEven: be,
+        trendFlags: a.trend?.flags,
         reasons: ae.reasons,
       });
     }
@@ -250,5 +322,77 @@ export function optimizeTree(
   // sort: highest priority first, then by spend (biggest money first)
   recs.sort((a, b) => a.priority - b.priority || b.spend - a.spend);
 
-  return { breakEvenRoas: blended, recommendations: recs, counts };
+  const budgetPlan = buildBudgetPlan(tree, recs);
+
+  return { breakEvenRoas: blended, recommendations: recs, counts, budgetPlan };
+}
+
+/** Concrete moves: pool the daily spend of losing campaigns (PAUSE 100%,
+ *  REDUCE 50%) per platform and hand it to the SCALE winners (capped at +30%
+ *  of each winner's current daily spend). Profit estimate is conservative:
+ *  moved money earns only 80% of the winner's current marginal ROAS, plus it
+ *  stops burning at the losers' ROAS. */
+function buildBudgetPlan(tree: AdTree, recs: Reco[]): BudgetMove[] {
+  const days = Math.max(1, tree.rangeDays);
+  const recoByCampaign = new Map<string, Reco>();
+  for (const r of recs) if (r.level === "CAMPAIGN") recoByCampaign.set(r.id, r);
+
+  const byPlatform = new Map<string, CampaignNode[]>();
+  for (const c of tree.campaigns) {
+    const arr = byPlatform.get(c.platform);
+    if (arr) arr.push(c);
+    else byPlatform.set(c.platform, [c]);
+  }
+
+  const moves: BudgetMove[] = [];
+  for (const [platform, camps] of byPlatform) {
+    const weight = (a: Action) => (a === "PAUSE" ? 1 : a === "REDUCE" ? 0.5 : 0);
+    const sources = camps
+      .map((c) => ({ c, w: weight(recoByCampaign.get(c.id)?.action ?? "KEEP") }))
+      .filter((s) => s.w > 0 && s.c.spend > 0);
+    if (sources.length === 0) continue;
+
+    let pool = sources.reduce((s, x) => s + (x.w * x.c.spend) / days, 0);
+    const poolSpend = sources.reduce((s, x) => s + x.w * x.c.spend, 0);
+    const poolRoas =
+      poolSpend > 0
+        ? sources.reduce((s, x) => s + x.w * x.c.spend * x.c.roas, 0) / poolSpend
+        : 0;
+    const fromNames = sources
+      .sort((a, b) => b.w * b.c.spend - a.w * a.c.spend)
+      .slice(0, 3)
+      .map((s) => s.c.name);
+
+    const targets = camps
+      .map((c) => ({ c, r: recoByCampaign.get(c.id) }))
+      .filter((t) => t.r?.action === "SCALE")
+      .sort((a, b) => {
+        const ea = (a.r!.usedRealRoas ? a.c.realRoas! : a.c.roas) - a.r!.breakEven;
+        const eb = (b.r!.usedRealRoas ? b.c.realRoas! : b.c.roas) - b.r!.breakEven;
+        return eb - ea;
+      });
+
+    for (const t of targets) {
+      if (pool < 500) break;
+      const cap = (0.3 * t.c.spend) / days; // +30%/day per winner
+      const x = Math.min(cap, pool);
+      if (x < 500) continue;
+      const be = t.r!.breakEven;
+      const roas = t.r!.usedRealRoas ? t.c.realRoas! : t.c.roas;
+      const gain = x * ((0.8 * roas) / be - 1);
+      const savedLoss = x * Math.max(0, 1 - poolRoas / be);
+      const est = gain + savedLoss;
+      if (est <= 0) continue;
+      moves.push({
+        platform,
+        from: fromNames,
+        to: t.c.name,
+        toId: t.c.id,
+        dailyAmount: Math.round(x),
+        estDailyProfit: Math.round(est),
+      });
+      pool -= x;
+    }
+  }
+  return moves.sort((a, b) => b.estDailyProfit - a.estDailyProfit);
 }

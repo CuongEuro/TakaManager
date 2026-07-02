@@ -56,7 +56,11 @@ export async function POST(req: NextRequest) {
     if (be) campaignBe.set(c.id, be);
   }
   const pauseMinSpend = Math.max(3000, Math.round(2 * bes.aov));
-  const rules = optimizeTree(tree, breakEvenRoas, { campaignBe, pauseMinSpend });
+  const rules = optimizeTree(tree, breakEvenRoas, {
+    campaignBe,
+    pauseMinSpend,
+    matchRateByPlatform: attr.matchRateByPlatform,
+  });
 
   const result = await aiOptimize(tree, rules, {
     preset,

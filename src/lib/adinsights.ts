@@ -19,12 +19,22 @@ export interface Kpis {
   cpm: number; // spend / impressions * 1000
 }
 
+// Current-half vs previous-half deltas over the selected range (≥14 days).
+export interface Trend {
+  spendDelta: number; // cur/prev − 1
+  roasDelta: number;
+  cpaDelta: number;
+  ctrDelta: number;
+  flags: ("WORSENING" | "IMPROVING" | "FATIGUE" | "NEW")[];
+}
+
 export interface AdsetNode extends Kpis {
   id: string;
   externalId: string;
   name: string;
   status: string | null;
   platform: string;
+  trend?: Trend | null;
 }
 
 export interface CampaignNode extends Kpis {
@@ -41,11 +51,13 @@ export interface CampaignNode extends Kpis {
   realOrders?: number;
   realRevenue?: number; // ex-tax
   realRoas?: number; // realRevenue / spend
+  trend?: Trend | null;
 }
 
 export interface AdTree {
   campaigns: CampaignNode[];
   totals: Kpis;
+  rangeDays: number; // trends need ≥ 14
 }
 
 interface Filters {
@@ -77,6 +89,46 @@ function deriveKpis(m: {
   };
 }
 
+type Raw = ReturnType<typeof zero>;
+const addRaw = (acc: Raw, x: Raw) => {
+  acc.spend += x.spend;
+  acc.impressions += x.impressions;
+  acc.clicks += x.clicks;
+  acc.conversions += x.conversions;
+  acc.revenue += x.revenue;
+};
+
+/** Deltas current-half vs previous-half. null = nothing to compare. */
+function computeTrend(cur: Raw, prev: Raw): Trend | null {
+  if (cur.spend <= 0 && prev.spend <= 0) return null;
+  if (prev.spend <= 0)
+    return { spendDelta: 1, roasDelta: 0, cpaDelta: 0, ctrDelta: 0, flags: ["NEW"] };
+  const kCur = deriveKpis(cur);
+  const kPrev = deriveKpis(prev);
+  const delta = (a: number, b: number) => (b > 0 ? a / b - 1 : 0);
+  const t: Trend = {
+    spendDelta: delta(cur.spend, prev.spend),
+    roasDelta: delta(kCur.roas, kPrev.roas),
+    cpaDelta: delta(kCur.cpa, kPrev.cpa),
+    ctrDelta: delta(kCur.ctr, kPrev.ctr),
+    flags: [],
+  };
+  // Only judge trend on meaningful previous spend (noise guard ¥1500).
+  if (prev.spend >= 1500) {
+    if (t.roasDelta <= -0.2) t.flags.push("WORSENING");
+    else if (t.roasDelta >= 0.2) t.flags.push("IMPROVING");
+  }
+  // Creative fatigue: CTR down ≥20% while spend held (≥80% of previous half).
+  if (
+    kPrev.ctr > 0 &&
+    t.ctrDelta <= -0.2 &&
+    cur.spend >= 0.8 * prev.spend &&
+    prev.spend >= 1500
+  )
+    t.flags.push("FATIGUE");
+  return t;
+}
+
 export async function getAdTree(
   range: { start: Date; end: Date },
   filters: Filters
@@ -90,6 +142,13 @@ export async function getAdTree(
   if (filters.storeId) where.storeId = filters.storeId;
   if (filters.platform) where.platform = filters.platform;
   if (filters.accountId) where.accountId = filters.accountId;
+
+  const rangeDays = Math.max(
+    1,
+    Math.round((range.end.getTime() - range.start.getTime()) / 86400000)
+  );
+  const trendOn = rangeDays >= 14; // halves too noisy below 2 weeks
+  const mid = new Date((range.start.getTime() + range.end.getTime()) / 2);
 
   const [entities, accounts] = await Promise.all([
     prisma.adEntity.findMany({
@@ -146,18 +205,25 @@ export async function getAdTree(
     return c;
   };
 
+  // per-campaign half-window accumulators (for campaign-level trend)
+  const campHalves = new Map<string, { cur: Raw; prev: Raw }>();
+
   for (const e of entities) {
     if (e.level !== "ADSET") continue;
-    const m = e.metrics.reduce(
-      (acc, x) => ({
-        spend: acc.spend + x.spend,
-        impressions: acc.impressions + x.impressions,
-        clicks: acc.clicks + x.clicks,
-        conversions: acc.conversions + x.conversions,
-        revenue: acc.revenue + x.revenue,
-      }),
-      zero()
-    );
+    const m = zero();
+    const cur = zero();
+    const prev = zero();
+    for (const x of e.metrics) {
+      const raw = {
+        spend: x.spend,
+        impressions: x.impressions,
+        clicks: x.clicks,
+        conversions: x.conversions,
+        revenue: x.revenue,
+      };
+      addRaw(m, raw);
+      addRaw(x.date < mid ? prev : cur, raw);
+    }
     const adset: AdsetNode = {
       id: e.id,
       externalId: e.externalId,
@@ -165,6 +231,7 @@ export async function getAdTree(
       status: e.status,
       platform: e.platform,
       ...deriveKpis(m),
+      trend: trendOn ? computeTrend(cur, prev) : null,
     };
 
     const campKey = `${e.accountId}|${e.parentExternalId}`;
@@ -179,6 +246,13 @@ export async function getAdTree(
       dataLevel: "adset",
     });
     camp.adsets.push(adset);
+    let halves = campHalves.get(campKey);
+    if (!halves) {
+      halves = { cur: zero(), prev: zero() };
+      campHalves.set(campKey, halves);
+    }
+    addRaw(halves.cur, cur);
+    addRaw(halves.prev, prev);
   }
 
   // Campaigns with spend but NO adset metrics in range (deep sync not run for
@@ -198,6 +272,7 @@ export async function getAdTree(
     select: {
       accountId: true,
       campaignName: true,
+      date: true,
       spend: true,
       impressions: true,
       clicks: true,
@@ -205,21 +280,28 @@ export async function getAdTree(
       revenue: true,
     },
   });
-  const spendAgg = new Map<string, ReturnType<typeof zero>>();
+  const spendAgg = new Map<string, { total: Raw; cur: Raw; prev: Raw }>();
   for (const r of spendRows) {
     const key = `${r.accountId}|${r.campaignName ?? ""}`;
-    const cur = spendAgg.get(key) ?? zero();
-    cur.spend += r.spend;
-    cur.impressions += r.impressions;
-    cur.clicks += r.clicks;
-    cur.conversions += r.conversions;
-    cur.revenue += r.revenue;
-    spendAgg.set(key, cur);
+    let agg = spendAgg.get(key);
+    if (!agg) {
+      agg = { total: zero(), cur: zero(), prev: zero() };
+      spendAgg.set(key, agg);
+    }
+    const raw = {
+      spend: r.spend,
+      impressions: r.impressions,
+      clicks: r.clicks,
+      conversions: r.conversions,
+      revenue: r.revenue,
+    };
+    addRaw(agg.total, raw);
+    addRaw(r.date < mid ? agg.prev : agg.cur, raw);
   }
   for (const [key, info] of campaignInfo) {
     if (campMap.has(key)) continue; // has adset data → covered
     const agg = spendAgg.get(`${info.accountId}|${info.name}`);
-    if (!agg || agg.spend <= 0) continue;
+    if (!agg || agg.total.spend <= 0) continue;
     campMap.set(key, {
       id: info.id,
       externalId: info.externalId,
@@ -229,14 +311,15 @@ export async function getAdTree(
       storeId: info.storeId,
       dataLevel: "campaign",
       adsets: [],
-      ...deriveKpis(agg),
+      ...deriveKpis(agg.total),
+      trend: trendOn ? computeTrend(agg.cur, agg.prev) : null,
     });
   }
 
   // roll adsets up to campaigns + compute campaign KPIs
   const campaigns: CampaignNode[] = [];
   const grand = zero();
-  for (const c of campMap.values()) {
+  for (const [key, c] of campMap) {
     if (c.dataLevel === "adset") {
       const agg = c.adsets.reduce(
         (acc, a) => ({
@@ -250,6 +333,9 @@ export async function getAdTree(
       );
       Object.assign(c, deriveKpis(agg));
       c.adsets.sort((a, b) => b.spend - a.spend);
+      const halves = campHalves.get(key);
+      c.trend =
+        trendOn && halves ? computeTrend(halves.cur, halves.prev) : null;
     }
     grand.spend += c.spend;
     grand.impressions += c.impressions;
@@ -260,5 +346,5 @@ export async function getAdTree(
   }
   campaigns.sort((a, b) => b.spend - a.spend);
 
-  return { campaigns, totals: deriveKpis(grand) };
+  return { campaigns, totals: deriveKpis(grand), rangeDays };
 }

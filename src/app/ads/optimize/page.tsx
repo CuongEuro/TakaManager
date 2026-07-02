@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AdTree, CampaignNode, AdsetNode } from "@/lib/adinsights";
+import type { AdTree, CampaignNode, AdsetNode, Trend } from "@/lib/adinsights";
 import type { OptimizeResult, Reco, Action } from "@/lib/optimize";
 import { ACTION_LABELS } from "@/lib/optimize";
 import { RANGE_PRESET_LABELS, RangePreset } from "@/lib/dates";
@@ -225,6 +225,39 @@ export default function OptimizePage() {
             )}
           </Card>
 
+          {/* Budget reallocation plan */}
+          {data.optimize.budgetPlan && data.optimize.budgetPlan.length > 0 && (
+            <Card>
+              <div className="mb-2 text-sm font-semibold text-slate-700">
+                💸 Đề xuất ngân sách
+              </div>
+              <ul className="space-y-2 text-sm text-slate-600">
+                {data.optimize.budgetPlan.map((m, i) => (
+                  <li key={i} className="flex flex-wrap items-center gap-2">
+                    <Badge tone="blue">{AD_PLATFORM_LABELS[m.platform] ?? m.platform}</Badge>
+                    <span>
+                      Chuyển <b>~{formatJPY(m.dailyAmount)}/ngày</b> từ{" "}
+                      <span className="text-slate-400">{m.from.join(", ")}</span> →{" "}
+                      <b>{m.to}</b>
+                    </span>
+                    <Badge tone="green">≈ +{formatJPY(m.estDailyProfit)}/ngày</Badge>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-[11px] text-slate-400">
+                Ước tính bảo thủ: tiền chuyển sang chỉ đạt 80% ROAS biên hiện tại của
+                campaign đích, cộng phần lỗ tránh được từ campaign nguồn. Mỗi đích
+                nhận tối đa +30% ngân sách/ngày.
+              </p>
+            </Card>
+          )}
+
+          {data.tree.rangeDays < 14 && (
+            <p className="text-xs text-slate-400">
+              Chọn khoảng ≥ 14 ngày để xem xu hướng (↗↘) và cảnh báo creative mệt mỏi.
+            </p>
+          )}
+
           {/* UTM reconciliation — how trustworthy the "Shopify ROAS" column is */}
           {data.attribution && data.attribution.paidOrders > 0 && (
             <Card>
@@ -385,6 +418,35 @@ export default function OptimizePage() {
   );
 }
 
+// Trend arrow next to ROAS: ↗/↘ + % (only when meaningful), 😴 fatigue, 🆕 new.
+function TrendMark({ t }: { t?: Trend | null }) {
+  if (!t) return null;
+  const parts: string[] = [];
+  if (t.flags.includes("NEW")) parts.push("🆕");
+  else if (Math.abs(t.roasDelta) >= 0.05)
+    parts.push(
+      `${t.roasDelta > 0 ? "↗" : "↘"} ${t.roasDelta > 0 ? "+" : "−"}${Math.round(
+        Math.abs(t.roasDelta) * 100
+      )}%`
+    );
+  if (t.flags.includes("FATIGUE")) parts.push("😴");
+  if (parts.length === 0) return null;
+  return (
+    <span
+      className={
+        t.flags.includes("WORSENING")
+          ? "text-rose-500"
+          : t.flags.includes("IMPROVING")
+          ? "text-emerald-500"
+          : "text-slate-400"
+      }
+      title="ROAS nửa kỳ sau so với nửa kỳ trước · 😴 = creative mệt mỏi (CTR giảm) · 🆕 = mới chạy"
+    >
+      {parts.join(" ")}
+    </span>
+  );
+}
+
 function KpiInline({ k, be }: { k: AdsetNode | CampaignNode; be: number }) {
   return (
     <div className="hidden items-center gap-4 text-xs text-slate-500 md:flex">
@@ -396,6 +458,7 @@ function KpiInline({ k, be }: { k: AdsetNode | CampaignNode; be: number }) {
       >
         ROAS {formatMultiplier(k.roas)}
       </span>
+      <TrendMark t={k.trend} />
       <span title={`CPC ${formatJPY(k.cpc)} · CPM ${formatJPY(k.cpm)}`}>
         CPA {k.conversions > 0 ? formatJPY(k.cpa) : "—"}
       </span>

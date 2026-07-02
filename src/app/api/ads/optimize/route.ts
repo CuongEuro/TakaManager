@@ -49,7 +49,11 @@ export async function GET(req: NextRequest) {
     if (be) campaignBe.set(c.id, be);
   }
   const pauseMinSpend = Math.max(3000, Math.round(2 * bes.aov));
-  const optimize = optimizeTree(tree, breakEvenRoas, { campaignBe, pauseMinSpend });
+  const optimize = optimizeTree(tree, breakEvenRoas, {
+    campaignBe,
+    pauseMinSpend,
+    matchRateByPlatform: attr.matchRateByPlatform,
+  });
 
   return NextResponse.json({
     preset,
