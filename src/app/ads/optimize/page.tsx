@@ -29,6 +29,18 @@ interface AttributionInfo {
   }[];
 }
 
+interface CalibrationRow {
+  platform: string;
+  spend: number;
+  platformRevenue: number;
+  shopifyRevenue: number;
+  shopifyOrders: number;
+  matchedRevenue: number;
+  overReport: number | null;
+  effRoas: number;
+  effCpa: number;
+}
+
 interface OptimizeResponse {
   preset: RangePreset;
   range: { start: string; end: string; days: number };
@@ -38,6 +50,7 @@ interface OptimizeResponse {
   aov: number;
   tree: AdTree;
   optimize: OptimizeResult;
+  calibration: CalibrationRow[];
   attribution: AttributionInfo;
 }
 
@@ -603,10 +616,93 @@ export default function OptimizePage() {
             </p>
           )}
 
-          {/* UTM reconciliation — how trustworthy the "Shopify ROAS" column is */}
+          {/* Data reconciliation — Shopify truth vs platform claims */}
           {data.attribution && data.attribution.paidOrders > 0 && (
             <Card>
-              <details>
+              <div className="mb-2 text-sm font-semibold text-slate-700">
+                🔎 Đối soát dữ liệu — Shopify (thật) vs nền tảng (tự báo)
+              </div>
+              {data.calibration && data.calibration.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase text-slate-400">
+                        <th className="px-2 py-1.5">Nền tảng</th>
+                        <th className="px-2 py-1.5 text-right">Spend</th>
+                        <th className="px-2 py-1.5 text-right">DT nền tảng báo</th>
+                        <th className="px-2 py-1.5 text-right">DT Shopify thật</th>
+                        <th className="px-2 py-1.5 text-right">Khai cao</th>
+                        <th className="px-2 py-1.5 text-right">ROAS thực</th>
+                        <th className="px-2 py-1.5 text-right">CPA thực</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.calibration.map((p) => (
+                        <tr key={p.platform} className="border-t border-slate-100">
+                          <td className="px-2 py-2 font-medium text-slate-700">
+                            {AD_PLATFORM_LABELS[p.platform] ?? p.platform}
+                          </td>
+                          <td className="px-2 py-2 text-right">{formatJPY(p.spend)}</td>
+                          <td className="px-2 py-2 text-right text-slate-400">
+                            {formatJPY(p.platformRevenue)}
+                          </td>
+                          <td className="px-2 py-2 text-right font-semibold text-slate-700">
+                            {p.shopifyRevenue > 0 ? (
+                              <>
+                                {formatJPY(p.shopifyRevenue)}
+                                <span className="ml-1 text-[10px] font-normal text-slate-400">
+                                  {formatNumber(p.shopifyOrders)} đơn
+                                </span>
+                              </>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td className="px-2 py-2 text-right">
+                            {p.overReport != null ? (
+                              <span
+                                className={
+                                  p.overReport >= 1.5
+                                    ? "font-semibold text-amber-600"
+                                    : "text-slate-500"
+                                }
+                              >
+                                ×{p.overReport.toFixed(2)}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                          <td
+                            className={`px-2 py-2 text-right font-semibold ${
+                              p.shopifyRevenue <= 0
+                                ? "text-slate-300"
+                                : p.effRoas >= data.breakEvenRoas
+                                ? "text-emerald-600"
+                                : "text-rose-600"
+                            }`}
+                          >
+                            {p.shopifyRevenue > 0 ? formatMultiplier(p.effRoas) : "—"}
+                          </td>
+                          <td className="px-2 py-2 text-right">
+                            {p.shopifyOrders > 0 ? formatJPY(p.effCpa) : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+                &quot;ROAS thực / CPA thực&quot; = doanh thu &amp; số đơn Shopify của
+                kênh ÷ spend — không phụ thuộc tracking nền tảng. Cột
+                &quot;Thực&quot; trên từng campaign = doanh thu khớp UTM + phần còn
+                lại của kênh phân bổ theo tỷ trọng nền tảng báo (tổng luôn khớp
+                Shopify). Nền tảng &quot;—&quot; là chưa hiệu chỉnh được vì đơn chưa
+                phân loại kênh.
+              </p>
+
+              <details className="mt-3">
                 <summary className="cursor-pointer text-sm font-semibold text-slate-700">
                   Đối soát UTM — khớp {formatPercent(data.attribution.matchRate)} (
                   {formatNumber(data.attribution.matchedOrders)}/
@@ -795,7 +891,7 @@ export default function OptimizePage() {
                         )}
                     </span>
                     <KpiInline k={c} be={reco?.breakEven ?? data.breakEvenRoas} />
-                    {c.realRoas != null && (
+                    {c.effRoas == null && c.realRoas != null && (
                       <span
                         className={`hidden text-xs font-semibold md:inline ${
                           c.realRoas >= (reco?.breakEven ?? data.breakEvenRoas)
@@ -809,11 +905,16 @@ export default function OptimizePage() {
                         Shopify {formatMultiplier(c.realRoas)}
                       </span>
                     )}
-                    {c.realRoas != null &&
-                      c.spend >= 3000 &&
-                      c.roas > 1.5 * c.realRoas && (
-                        <Badge tone="amber">⚠ Platform khai cao</Badge>
-                      )}
+                    {(() => {
+                      const truth = c.effRoas ?? c.realRoas;
+                      return (
+                        truth != null &&
+                        c.spend >= 3000 &&
+                        c.roas > 1.5 * truth && (
+                          <Badge tone="amber">⚠ NT khai cao</Badge>
+                        )
+                      );
+                    })()}
                     {reco && <Badge tone={ACTION_TONE[reco.action]}>{ACTION_LABELS[reco.action]}</Badge>}
                   </button>
                   </div>
@@ -1013,19 +1114,43 @@ function TrendMark({ t }: { t?: Trend | null }) {
 }
 
 function KpiInline({ k, be }: { k: AdsetNode | CampaignNode | AdNode; be: number }) {
+  const eff = k.effRoas;
+  const effCpa = (k as CampaignNode).effCpa;
   return (
     <div className="hidden items-center gap-4 text-xs text-slate-500 md:flex">
       <span>{formatJPY(k.spend)}</span>
-      <span
-        className={`font-semibold ${
-          k.roas >= be ? "text-emerald-600" : "text-rose-600"
-        }`}
-      >
-        ROAS {formatMultiplier(k.roas)}
-      </span>
+      {eff != null ? (
+        <>
+          {/* Shopify-anchored ROAS is THE number; platform's claim is muted */}
+          <span
+            className={`font-semibold ${
+              eff >= be ? "text-emerald-600" : "text-rose-600"
+            }`}
+            title="ROAS THỰC = doanh thu Shopify (khớp UTM + phần kênh chưa khớp phân bổ theo tỷ trọng nền tảng) ÷ spend"
+          >
+            Thực {formatMultiplier(eff)}
+          </span>
+          <span className="text-slate-400" title="ROAS nền tảng tự báo (thường khai cao)">
+            NT {formatMultiplier(k.roas)}
+          </span>
+        </>
+      ) : (
+        <span
+          className={`font-semibold ${
+            k.roas >= be ? "text-emerald-600" : "text-rose-600"
+          }`}
+        >
+          ROAS {formatMultiplier(k.roas)}
+        </span>
+      )}
       <TrendMark t={k.trend} />
       <span title={`CPC ${formatJPY(k.cpc)} · CPM ${formatJPY(k.cpm)}`}>
-        CPA {k.conversions > 0 ? formatJPY(k.cpa) : "—"}
+        CPA{" "}
+        {effCpa != null && effCpa > 0
+          ? `${formatJPY(effCpa)} (thực)`
+          : k.conversions > 0
+          ? formatJPY(k.cpa)
+          : "—"}
       </span>
       <span>CTR {formatPercent(k.ctr)}</span>
       <span>CVR {formatPercent(k.cvr)}</span>

@@ -222,12 +222,27 @@ export function optimizeTree(
     const noConvData = noConvPlatforms.has(c.platform);
     const campaignOff = isOff(c.status);
 
-    // Judge on REAL Shopify ROAS when the platform's UTM match rate is good —
-    // platform-reported revenue over-attributes (view-through, long windows).
+    // Judge on Shopify-anchored numbers, best first:
+    // 1) EFFECTIVE metrics (UTM-matched + calibrated remainder — roas AND
+    //    conversions/cpa become real, so even a platform with broken pixel
+    //    tracking is fully scoreable);
+    // 2) raw UTM-matched real ROAS when match rate is good;
+    // 3) platform-reported numbers as the last resort.
+    const hasEff = c.effRoas != null;
     const usedRealRoas =
-      c.realRoas != null &&
-      (opts.matchRateByPlatform?.[c.platform] ?? 0) >= 0.6;
-    const judged: Kpis = usedRealRoas ? { ...c, roas: c.realRoas! } : c;
+      hasEff ||
+      (c.realRoas != null &&
+        (opts.matchRateByPlatform?.[c.platform] ?? 0) >= 0.6);
+    const judged: Kpis = hasEff
+      ? {
+          ...c,
+          roas: c.effRoas!,
+          conversions: c.effOrders ?? c.conversions,
+          cpa: c.effCpa ?? c.cpa,
+        }
+      : usedRealRoas
+      ? { ...c, roas: c.realRoas! }
+      : c;
 
     let ce: { action: Action; priority: number; reasons: string[] };
     if (campaignOff) {
@@ -241,19 +256,30 @@ export function optimizeTree(
         evaluate(judged, be, minSpend, pauseMinSpend, noConvData),
         c.trend
       );
-      if (usedRealRoas)
+      if (hasEff)
+        ce.reasons.push(
+          `Chấm theo ROAS THỰC ${formatMultiplier(
+            c.effRoas!
+          )} (doanh thu Shopify hiệu chỉnh · ~${(c.effOrders ?? 0).toFixed(
+            0
+          )} đơn) — nền tảng tự báo ${formatMultiplier(c.roas)}.`
+        );
+      else if (usedRealRoas)
         ce.reasons.push(
           `Chấm theo ROAS Shopify ${formatMultiplier(
             c.realRoas!
           )} (nền tảng tự báo ${formatMultiplier(c.roas)}).`
         );
 
-      // structural hint: budget reallocation when adsets diverge
+      // structural hint: budget reallocation when adsets diverge (judge on
+      // effective ROAS when calibrated)
+      const aRoas = (a: { roas: number; effRoas?: number }) =>
+        a.effRoas ?? a.roas;
       const scalers = c.adsets.filter(
-        (a) => !isOff(a.status) && a.spend >= minSpend && a.roas >= be * 1.3
+        (a) => !isOff(a.status) && a.spend >= minSpend && aRoas(a) >= be * 1.3
       );
       const losers = c.adsets.filter(
-        (a) => !isOff(a.status) && a.spend >= minSpend && a.roas < be * 0.7
+        (a) => !isOff(a.status) && a.spend >= minSpend && aRoas(a) < be * 0.7
       );
       if (scalers.length && losers.length) {
         ce.reasons.push(
@@ -277,6 +303,7 @@ export function optimizeTree(
     });
 
     for (const a of c.adsets) {
+      const aJudged: Kpis = a.effRoas != null ? { ...a, roas: a.effRoas } : a;
       const ae =
         campaignOff || isOff(a.status)
           ? {
@@ -289,7 +316,7 @@ export function optimizeTree(
               ],
             }
           : applyTrend(
-              evaluate(a, be, minSpend, pauseMinSpend, noConvData),
+              evaluate(aJudged, be, minSpend, pauseMinSpend, noConvData),
               a.trend
             );
       recs.push({
@@ -309,6 +336,8 @@ export function optimizeTree(
       // AD/creative tier — per-creative guidance (kill weak creatives, keep
       // winners). Excluded from the summary counts (see below).
       for (const ad of a.ads ?? []) {
+        const adJudged: Kpis =
+          ad.effRoas != null ? { ...ad, roas: ad.effRoas } : ad;
         const de =
           campaignOff || isOff(a.status) || isOff(ad.status)
             ? {
@@ -317,7 +346,7 @@ export function optimizeTree(
                 reasons: ["Quảng cáo đã tắt hoặc thuộc nhóm/chiến dịch đã tắt."],
               }
             : applyTrend(
-                evaluate(ad, be, minSpend, pauseMinSpend, noConvData),
+                evaluate(adJudged, be, minSpend, pauseMinSpend, noConvData),
                 ad.trend
               );
         recs.push({
@@ -383,11 +412,19 @@ function buildBudgetPlan(tree: AdTree, recs: Reco[]): BudgetMove[] {
       .filter((s) => s.w > 0 && s.c.spend > 0);
     if (sources.length === 0) continue;
 
+    // Judge sources/targets on the best-available ROAS (effective > real > platform).
+    const roasOf = (c: CampaignNode, r?: Reco) =>
+      c.effRoas ?? (r?.usedRealRoas && c.realRoas != null ? c.realRoas : c.roas);
     let pool = sources.reduce((s, x) => s + (x.w * x.c.spend) / days, 0);
     const poolSpend = sources.reduce((s, x) => s + x.w * x.c.spend, 0);
     const poolRoas =
       poolSpend > 0
-        ? sources.reduce((s, x) => s + x.w * x.c.spend * x.c.roas, 0) / poolSpend
+        ? sources.reduce(
+            (s, x) =>
+              s +
+              x.w * x.c.spend * roasOf(x.c, recoByCampaign.get(x.c.id)),
+            0
+          ) / poolSpend
         : 0;
     const fromNames = sources
       .sort((a, b) => b.w * b.c.spend - a.w * a.c.spend)
@@ -398,8 +435,8 @@ function buildBudgetPlan(tree: AdTree, recs: Reco[]): BudgetMove[] {
       .map((c) => ({ c, r: recoByCampaign.get(c.id) }))
       .filter((t) => t.r?.action === "SCALE")
       .sort((a, b) => {
-        const ea = (a.r!.usedRealRoas ? a.c.realRoas! : a.c.roas) - a.r!.breakEven;
-        const eb = (b.r!.usedRealRoas ? b.c.realRoas! : b.c.roas) - b.r!.breakEven;
+        const ea = roasOf(a.c, a.r) - a.r!.breakEven;
+        const eb = roasOf(b.c, b.r) - b.r!.breakEven;
         return eb - ea;
       });
 
@@ -409,7 +446,7 @@ function buildBudgetPlan(tree: AdTree, recs: Reco[]): BudgetMove[] {
       const x = Math.min(cap, pool);
       if (x < 500) continue;
       const be = t.r!.breakEven;
-      const roas = t.r!.usedRealRoas ? t.c.realRoas! : t.c.roas;
+      const roas = roasOf(t.c, t.r);
       const gain = x * ((0.8 * roas) / be - 1);
       const savedLoss = x * Math.max(0, 1 - poolRoas / be);
       const est = gain + savedLoss;

@@ -4,7 +4,10 @@ import { resolveRange, RangePreset } from "@/lib/dates";
 import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
 import { computeStoreBreakEvens } from "@/lib/pnl";
-import { computeCampaignAttribution } from "@/lib/attribution";
+import {
+  computeCampaignAttribution,
+  applyEffectiveMetrics,
+} from "@/lib/attribution";
 import { aiOptimize, AI_MODEL } from "@/lib/ai";
 import { getSession } from "@/lib/auth";
 
@@ -51,6 +54,9 @@ export async function POST(req: NextRequest) {
       c.realRoas = c.spend > 0 ? real.realRevenue / c.spend : 0;
     }
   }
+  // Effective metrics BEFORE any narrowing — calibration needs the whole
+  // platform to distribute the channel truth correctly.
+  const calibration = applyEffectiveMetrics(tree.campaigns, attr);
 
   // Narrow to the selected campaigns AFTER decoration → the rules, budget plan
   // and AI payload all scope to just those (attribution match rates stay
@@ -79,6 +85,7 @@ export async function POST(req: NextRequest) {
     storeName: store?.name ?? null,
     matchRate: attr.matchRate,
     aov: bes.aov,
+    calibration,
   });
 
   // Keep a history of generated strategies (audit + re-read later).

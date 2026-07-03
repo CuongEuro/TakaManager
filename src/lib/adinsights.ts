@@ -35,6 +35,7 @@ export interface AdNode extends Kpis {
   status: string | null;
   platform: string;
   trend?: Trend | null;
+  effRoas?: number; // campaign correction ratio applied (see attribution.ts)
 }
 
 export interface AdsetNode extends Kpis {
@@ -45,6 +46,7 @@ export interface AdsetNode extends Kpis {
   platform: string;
   trend?: Trend | null;
   ads: AdNode[]; // AD/creative tier (may be empty if not synced deep)
+  effRoas?: number; // campaign correction ratio applied (see attribution.ts)
 }
 
 export interface CampaignNode extends Kpis {
@@ -61,6 +63,13 @@ export interface CampaignNode extends Kpis {
   realOrders?: number;
   realRevenue?: number; // ex-tax
   realRoas?: number; // realRevenue / spend
+  // EFFECTIVE metrics (applyEffectiveMetrics): UTM-matched revenue + the
+  // channel's unmatched Shopify revenue distributed by the platform's own
+  // relative weights. Sums to the channel truth — platform inflation removed.
+  effRevenue?: number;
+  effOrders?: number;
+  effRoas?: number;
+  effCpa?: number;
   trend?: Trend | null;
 }
 

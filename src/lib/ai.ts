@@ -8,6 +8,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { AdTree } from "@/lib/adinsights";
 import { OptimizeResult } from "@/lib/optimize";
+import { PlatformCalibration } from "@/lib/attribution";
 
 export const AI_MODEL = "claude-opus-4-8";
 
@@ -44,7 +45,11 @@ export interface AiOptimizeResult {
 function buildPayload(
   tree: AdTree,
   rules: OptimizeResult,
-  extra: { matchRate?: number; aov?: number }
+  extra: {
+    matchRate?: number;
+    aov?: number;
+    calibration?: PlatformCalibration[];
+  }
 ) {
   const beByCampaign = new Map<string, number>();
   for (const r of rules.recommendations)
@@ -54,6 +59,18 @@ function buildPayload(
     breakEvenRoas: Number(rules.breakEvenRoas.toFixed(2)),
     aov: Math.round(extra.aov ?? 0),
     utmMatchRate: Number(((extra.matchRate ?? 0) * 100).toFixed(0)), // %
+    // Per-platform reconciliation: how much the platform over-reports vs the
+    // Shopify channel truth, and the TRUE blended ROAS/CPA per platform.
+    platformCalibration: (extra.calibration ?? []).map((p) => ({
+      platform: p.platform,
+      spend: Math.round(p.spend),
+      platformClaimedRevenue: Math.round(p.platformRevenue),
+      shopifyRealRevenue: Math.round(p.shopifyRevenue),
+      shopifyRealOrders: p.shopifyOrders,
+      overReportFactor: p.overReport != null ? Number(p.overReport.toFixed(2)) : null,
+      trueRoas: Number(p.effRoas.toFixed(2)),
+      trueCpa: Math.round(p.effCpa),
+    })),
     totals: {
       spend: Math.round(tree.totals.spend),
       revenue: Math.round(tree.totals.revenue),
@@ -78,6 +95,9 @@ function buildPayload(
       roas: Number(c.roas.toFixed(2)),
       realRoasShopify: c.realRoas != null ? Number(c.realRoas.toFixed(2)) : null,
       realOrdersShopify: c.realOrders ?? null,
+      effRoas: c.effRoas != null ? Number(c.effRoas.toFixed(2)) : null,
+      effOrders: c.effOrders != null ? Math.round(c.effOrders) : null,
+      effCpa: c.effCpa != null ? Math.round(c.effCpa) : null,
       conversions: Math.round(c.conversions),
       cpa: Math.round(c.cpa),
       ctr: Number((c.ctr * 100).toFixed(2)),
@@ -107,10 +127,11 @@ function buildPayload(
 
 const SYSTEM_PROMPT = `Bạn là chuyên gia mua quảng cáo (media buyer) cấp cao cho doanh nghiệp Print-on-Demand bán tại thị trường Nhật Bản, chạy đa nền tảng Facebook/Meta, Google, Twitter/X.
 
-Bạn nhận dữ liệu Campaign → Adset kèm KPI (spend, revenue, ROAS, conversions, CPA, CTR%, CVR%), điểm hoà vốn ROAS RIÊNG từng campaign (breakEven — theo biên lợi nhuận store của campaign đó), ROAS THỰC từ Shopify (realRoasShopify — doanh thu đơn hàng thật khớp utm_campaign; đáng tin hơn số nền tảng tự báo khi utmMatchRate cao), xu hướng nửa kỳ sau vs nửa kỳ trước (trend: WORSENING/IMPROVING/FATIGUE/NEW), và một kế hoạch tái phân bổ ngân sách sơ bộ (budgetPlan).
+Bạn nhận dữ liệu Campaign → Adset kèm KPI (spend, revenue, ROAS, conversions, CPA, CTR%, CVR%), điểm hoà vốn ROAS RIÊNG từng campaign (breakEven — theo biên lợi nhuận store của campaign đó), ROAS THỰC từ Shopify ở 2 mức: realRoasShopify (doanh thu đơn khớp utm_campaign) và effRoas/effCpa/effOrders (SỐ HIỆU CHỈNH: doanh thu Shopify thật của cả kênh phân bổ về từng campaign — tổng luôn khớp Shopify, đã loại bỏ khai khống của nền tảng). Kèm platformCalibration (mỗi nền tảng: doanh thu nền tảng khai vs Shopify thật, hệ số khai cao overReportFactor, trueRoas/trueCpa), xu hướng (trend: WORSENING/IMPROVING/FATIGUE/NEW), và kế hoạch tái phân bổ sơ bộ (budgetPlan).
 
 Nguyên tắc:
-- So ROAS với breakEven CỦA TỪNG campaign. Ưu tiên realRoasShopify khi có (nền tảng thường khai cao do view-through).
+- TRACKING NỀN TẢNG KHÔNG ĐÁNG TIN. Thứ tự ưu tiên khi đánh giá: effRoas/effCpa (chuẩn nhất) > realRoasShopify > số nền tảng (chỉ dùng để so TƯƠNG ĐỐI giữa các campaign cùng nền tảng, không dùng giá trị tuyệt đối).
+- So ROAS với breakEven CỦA TỪNG campaign. Nêu rõ hệ số khai cao của nền tảng khi nó lớn (overReportFactor ≥ 1.5).
 - status PAUSED/ARCHIVED = đã tắt → đừng khuyên tạm dừng nữa.
 - Chẩn đoán phễu: CTR thấp = creative; CTR ổn + CVR thấp = landing/giá/offer; FATIGUE = creative mệt mỏi cần mẫu mới.
 - WORSENING → đừng scale, cân nhắc giảm sớm. Tiền lớn xử lý trước.
@@ -182,6 +203,7 @@ export async function aiOptimize(
     storeName?: string | null;
     matchRate?: number;
     aov?: number;
+    calibration?: PlatformCalibration[];
   }
 ): Promise<AiOptimizeResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -199,6 +221,7 @@ export async function aiOptimize(
   const payload = buildPayload(tree, rules, {
     matchRate: context.matchRate,
     aov: context.aov,
+    calibration: context.calibration,
   });
 
   try {

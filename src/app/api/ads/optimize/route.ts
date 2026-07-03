@@ -3,7 +3,10 @@ import { resolveRange, RangePreset } from "@/lib/dates";
 import { getAdTree } from "@/lib/adinsights";
 import { optimizeTree } from "@/lib/optimize";
 import { computeStoreBreakEvens } from "@/lib/pnl";
-import { computeCampaignAttribution } from "@/lib/attribution";
+import {
+  computeCampaignAttribution,
+  applyEffectiveMetrics,
+} from "@/lib/attribution";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +41,9 @@ export async function GET(req: NextRequest) {
       c.realRoas = c.spend > 0 ? real.realRevenue / c.spend : 0;
     }
   }
+  // Reconcile with the Shopify channel truth → eff* metrics per campaign
+  // (and scaled down to adsets/ads). Platform inflation is removed here.
+  const calibration = applyEffectiveMetrics(tree.campaigns, attr);
 
   // Judge every campaign against ITS store's break-even (margins differ per
   // store); the blended number remains the summary bar / fallback.
@@ -64,6 +70,7 @@ export async function GET(req: NextRequest) {
     aov: bes.aov,
     tree,
     optimize,
+    calibration,
     attribution: {
       matchRate: attr.matchRate,
       matchRateByPlatform: attr.matchRateByPlatform,
