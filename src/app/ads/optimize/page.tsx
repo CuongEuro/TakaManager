@@ -397,6 +397,68 @@ export default function OptimizePage() {
         <EmptyState message="Chưa có dữ liệu campaign/adset. Hãy Sync ở trang Kết nối Ads (hoặc chạy seed)." />
       ) : (
         <div className="space-y-5">
+          {/* Glossary — one place explaining every metric/term on this page */}
+          <Card>
+            <details>
+              <summary className="cursor-pointer text-sm font-semibold text-slate-700">
+                📖 Giải thích thuật ngữ — ROAS, NT, CVR, utm_campaign, khai cao là gì?
+              </summary>
+              <div className="mt-3 grid gap-5 text-xs leading-relaxed text-slate-600 md:grid-cols-2">
+                <div>
+                  <div className="mb-1.5 text-xs font-semibold uppercase text-slate-400">
+                    Chỉ số hiệu suất
+                  </div>
+                  <div className="space-y-1.5">
+                    <p><b className="text-slate-700">ROAS</b> (Return on Ad Spend) — doanh thu ÷ chi phí quảng cáo. ROAS 3.0 nghĩa là chi 1đ thu về 3đ doanh thu.</p>
+                    <p><b className="text-slate-700">Hoà vốn ROAS / HV</b> — mức ROAS tối thiểu để KHÔNG lỗ, tính theo biên lợi nhuận (giá vốn, ship, phí sàn…) riêng của từng store. ROAS &lt; HV = có doanh thu nhưng vẫn lỗ.</p>
+                    <p><b className="text-slate-700">CPA</b> — chi phí trung bình cho 1 đơn hàng = spend ÷ số đơn.</p>
+                    <p><b className="text-slate-700">CPC / CPM</b> — chi phí mỗi lượt click / mỗi 1.000 lượt hiển thị.</p>
+                    <p><b className="text-slate-700">CTR</b> — tỷ lệ click ÷ lượt hiển thị. Thấp thường do creative chưa hấp dẫn.</p>
+                    <p><b className="text-slate-700">CVR</b> — tỷ lệ đơn hàng ÷ lượt click. CTR ổn nhưng CVR thấp thường do landing page/giá/offer, không phải creative.</p>
+                    <p><b className="text-slate-700">AOV</b> — giá trị đơn hàng trung bình, dùng để ước lượng ngưỡng spend tối thiểu trước khi kết luận PAUSE.</p>
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 text-xs font-semibold uppercase text-slate-400">
+                    Vì sao có 2 số ROAS (NT vs Thực)
+                  </div>
+                  <div className="space-y-1.5">
+                    <p><b className="text-slate-700">NT</b> = &quot;Nền tảng&quot; — ROAS/doanh thu do chính Meta/Google/X tự báo qua pixel của họ. Số này hay bị thổi phồng (đa chạm, tracking lỗi…), chỉ nên dùng để so sánh TƯƠNG ĐỐI giữa các campaign cùng nền tảng.</p>
+                    <p><b className="text-slate-700">Thực</b> — ROAS đã hiệu chỉnh về đúng doanh thu Shopify thật của campaign đó (xem bảng &quot;🔎 Đối soát dữ liệu&quot; bên dưới). Đây là số nên tin để quyết định.</p>
+                    <p><b className="text-slate-700">utm_campaign</b> — tham số gắn trong link quảng cáo; khi khách mua hàng, Shopify lưu lại utm_campaign của đơn đó. App so khớp utm_campaign với TÊN campaign để biết chính xác đơn nào đến từ campaign nào.</p>
+                    <p><b className="text-slate-700">Khớp UTM (match rate)</b> — % đơn hàng từ kênh trả phí có utm_campaign khớp đúng tên 1 campaign đang chạy. Khớp càng cao, số &quot;Thực&quot; càng đáng tin.</p>
+                    <p><b className="text-slate-700">Khai cao (×)</b> — nền tảng tự báo doanh thu gấp bao nhiêu lần doanh thu Shopify thật của CẢ kênh đó. ×1.8 = Meta báo cao gấp 1.8 lần thực tế.</p>
+                    <p><b className="text-slate-700">ROAS thực / CPA thực</b> (trong bảng đối soát) — tính trên toàn bộ kênh: doanh thu/đơn Shopify thật ÷ spend, không phụ thuộc tracking nền tảng.</p>
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 text-xs font-semibold uppercase text-slate-400">
+                    Nhãn hành động đề xuất
+                  </div>
+                  <div className="space-y-1.5">
+                    <p><Badge tone="green">🚀 Tăng ngân sách</Badge> ROAS thực đang tốt hơn hoà vốn rõ rệt, không có dấu hiệu xấu đi.</p>
+                    <p><Badge tone="blue">✓ Giữ &amp; theo dõi</Badge> Đang hiệu quả, chưa cần đổi gì.</p>
+                    <p><Badge tone="amber">↓ Giảm / Tối ưu</Badge> ROAS thực thấp hơn hoà vốn hoặc đang xấu đi.</p>
+                    <p><Badge tone="rose">⛔ Tạm dừng</Badge> Lỗ rõ ràng và đủ dữ liệu để kết luận.</p>
+                    <p><Badge tone="slate">🔍 Chưa đủ data</Badge> Spend/conversion còn quá ít để kết luận chắc chắn.</p>
+                    <p><Badge tone="amber">⚠ Thiếu tracking</Badge> Có spend nhưng nền tảng không ghi nhận chuyển đổi nào — có thể do lỗi tracking chứ không hẳn ads kém.</p>
+                    <p><Badge tone="slate">💤 Đã tắt</Badge> Campaign/adset/ad đã PAUSED/ARCHIVED trên nền tảng.</p>
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 text-xs font-semibold uppercase text-slate-400">
+                    Xu hướng
+                  </div>
+                  <div className="space-y-1.5">
+                    <p><span className="text-rose-500">↘ −x%</span> / <span className="text-emerald-500">↗ +x%</span> — ROAS nửa sau kỳ so với nửa đầu kỳ đã chọn (chỉ hiện khi chọn ≥ 14 ngày).</p>
+                    <p>😴 <b className="text-slate-700">FATIGUE</b> — CTR giảm rõ dù vẫn giữ mức spend → creative đang &quot;mệt&quot;, nên đổi mẫu mới.</p>
+                    <p>🆕 <b className="text-slate-700">NEW</b> — campaign/adset mới chạy, chưa đủ dữ liệu nửa kỳ trước để so sánh.</p>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </Card>
+
           {/* Summary bar */}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
             <Card>
