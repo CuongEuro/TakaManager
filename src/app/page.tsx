@@ -50,6 +50,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingAds, setRefreshingAds] = useState(false);
+  const [refreshingCosts, setRefreshingCosts] = useState(false);
 
   const loadDashboard = useCallback(async (): Promise<DashboardResponse> => {
     const params = new URLSearchParams({
@@ -116,22 +117,36 @@ export default function DashboardPage() {
   // Hourly Shopify refresh (returns + Cost per item, last 2 days by
   // updated_at) — same cadence as ads. Runs for ANY viewed range: a refund
   // issued today changes the ORDER's day, so historical views benefit too.
-  const doShopifyRefresh = useCallback(async () => {
-    try {
-      const r = await fetch("/api/shopify/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      }).then((x) => x.json());
-      if ((r.refundsUpdated ?? 0) > 0 || (r.costsUpdated ?? 0) > 0)
-        setData(await loadDashboard());
-    } catch {
-      /* ignore — dashboard still shows last-synced values */
-    }
-  }, [loadDashboard]);
+  // force=true (manual button) always reloads + stamps localStorage so the
+  // hourly auto-check doesn't immediately fire again right after.
+  const doShopifyRefresh = useCallback(
+    async (force = false) => {
+      if (force) setRefreshingCosts(true);
+      try {
+        const r = await fetch("/api/shopify/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }).then((x) => x.json());
+        try {
+          localStorage.setItem("taka:shopify-last-refresh", String(Date.now()));
+        } catch {
+          /* ignore quota */
+        }
+        if (force || (r.refundsUpdated ?? 0) > 0 || (r.costsUpdated ?? 0) > 0)
+          setData(await loadDashboard());
+      } catch {
+        /* ignore — dashboard still shows last-synced values */
+      } finally {
+        if (force) setRefreshingCosts(false);
+      }
+    },
+    [loadDashboard]
+  );
   useAutoRefresh("taka:shopify-last-refresh", doShopifyRefresh);
 
   const refreshAdsNow = () => doAdsRefresh(true);
+  const refreshCostsNow = () => doShopifyRefresh(true);
 
   const s = data?.summary;
   const netTone = s && s.profit.netProfit >= 0 ? "good" : "bad";
@@ -162,6 +177,14 @@ export default function DashboardPage() {
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
               {refreshingAds ? "Đang cập nhật Ads…" : "🔄 Cập nhật Ads"}
+            </button>
+            <button
+              onClick={refreshCostsNow}
+              disabled={refreshingCosts}
+              title="Tự cập nhật tối đa 1 lần/giờ. Bấm để kéo lại Cost per item (Basecost) & hoàn tiền từ Shopify ngay bây giờ."
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {refreshingCosts ? "Đang cập nhật Basecost…" : "🔄 Cập nhật Basecost"}
             </button>
             <div className="w-full sm:w-44">
               <Select value={storeId} onChange={(e) => setStoreId(e.target.value)}>
