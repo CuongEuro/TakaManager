@@ -407,23 +407,38 @@ export async function fetchProductCosts(
   const out = new Map<string, number>();
   if (productGids.length === 0) return out;
   const c = await resolveCreds(creds);
-  for (let i = 0; i < productGids.length; i += 25) {
-    const ids = productGids.slice(i, i + 25);
-    const data = await shopifyGraphQL<{
-      nodes: ({
-        id: string;
-        variants: {
-          nodes: { inventoryItem: { unitCost: { amount: string } | null } | null }[];
-        };
-      } | null)[];
-    }>(c, PRODUCT_COSTS_QUERY, { ids });
-    for (const n of data.nodes) {
-      if (!n?.id) continue;
-      for (const v of n.variants?.nodes ?? []) {
-        const cost = num(v?.inventoryItem?.unitCost?.amount);
-        if (cost > 0) {
-          out.set(n.id, cost);
-          break;
+  const chunks: string[][] = [];
+  for (let i = 0; i < productGids.length; i += 25)
+    chunks.push(productGids.slice(i, i + 25));
+
+  // Chunks are independent GraphQL calls — a large catalog run one-by-one was
+  // slow enough (network round-trip × chunk count) to trip Vercel's 60s
+  // function cap. Run a bounded number in parallel instead; still far under
+  // Shopify's rate-limit bucket since each chunk is cheap.
+  const CONCURRENCY = 4;
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const group = chunks.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      group.map((ids) =>
+        shopifyGraphQL<{
+          nodes: ({
+            id: string;
+            variants: {
+              nodes: { inventoryItem: { unitCost: { amount: string } | null } | null }[];
+            };
+          } | null)[];
+        }>(c, PRODUCT_COSTS_QUERY, { ids })
+      )
+    );
+    for (const data of results) {
+      for (const n of data.nodes) {
+        if (!n?.id) continue;
+        for (const v of n.variants?.nodes ?? []) {
+          const cost = num(v?.inventoryItem?.unitCost?.amount);
+          if (cost > 0) {
+            out.set(n.id, cost);
+            break;
+          }
         }
       }
     }

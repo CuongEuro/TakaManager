@@ -68,6 +68,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Parse a fetch response as JSON without crashing on non-JSON bodies — a
+// timed-out serverless function (504) returns an HTML/text error page, and
+// `res.json()` on that throws a cryptic "Unexpected token" instead of a
+// message the user can act on.
+async function safeJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {
+      error:
+        res.status === 504
+          ? "Quá thời gian chờ (504) — quá nhiều dữ liệu để xử lý trong 1 lần. Thử lại hoặc chọn khoảng ngày ngắn hơn."
+          : `Máy chủ lỗi (HTTP ${res.status}).`,
+    };
+  }
+}
+
 class FatalSyncError extends Error {} // never retried (e.g. deploy not ready)
 
 /** True if the error looks like a lost/suspended network connection (laptop
@@ -701,10 +719,10 @@ export default function StoresPage() {
               from: ymd(from),
               to: ymd(to),
             }),
-          }).then((x) => x.json());
-          products += r.products ?? 0;
-          withCost += r.withCost ?? 0;
-          if (r.ok) updated += r.updated ?? 0;
+          }).then(safeJson);
+          products += Number(r.products) || 0;
+          withCost += Number(r.withCost) || 0;
+          if (r.ok) updated += Number(r.updated) || 0;
           else errors.push(`${s.name}: ${r.error}`);
         } catch (e) {
           errors.push(`${s.name}: ${e instanceof Error ? e.message : String(e)}`);

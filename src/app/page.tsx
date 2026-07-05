@@ -40,6 +40,24 @@ const dayStr = (d: Date) =>
     d.getDate()
   ).padStart(2, "0")}`;
 
+// Parse a fetch response as JSON without crashing on non-JSON bodies — a
+// timed-out serverless function (504) returns an HTML/text error page, and
+// `res.json()` on that throws a cryptic "Unexpected token" instead of a
+// message the user can act on.
+async function safeJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {
+      error:
+        res.status === 504
+          ? "Quá thời gian chờ (504) — quá nhiều dữ liệu để xử lý trong 1 lần. Thử lại hoặc chọn khoảng ngày ngắn hơn."
+          : `Máy chủ lỗi (HTTP ${res.status}).`,
+    };
+  }
+}
+
 export default function DashboardPage() {
   // Default to "today" (single-day range) on open.
   const [range, setRange] = useState<DateRange>(() => ({
@@ -51,6 +69,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [refreshingAds, setRefreshingAds] = useState(false);
   const [refreshingCosts, setRefreshingCosts] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
 
   const loadDashboard = useCallback(async (): Promise<DashboardResponse> => {
     const params = new URLSearchParams({
@@ -84,15 +103,24 @@ export default function DashboardPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(force ? { force: true } : {}),
-        }).then((x) => x.json());
+        }).then(safeJson);
         try {
           localStorage.setItem("taka:ads-last-refresh", String(Date.now()));
         } catch {
           /* ignore quota */
         }
-        if (force || (r.ok ?? 0) > 0) setData(await loadDashboard());
-      } catch {
-        /* ignore — dashboard still shows last-synced spend */
+        if (force)
+          setRefreshMsg(
+            r.error
+              ? `⚠ Cập nhật Ads lỗi: ${r.error}`
+              : `✓ Đã cập nhật Ads (${r.ok ?? 0}/${r.refreshed ?? 0} tài khoản).`
+          );
+        if (force || (Number(r.ok) || 0) > 0) setData(await loadDashboard());
+      } catch (e) {
+        if (force)
+          setRefreshMsg(
+            `⚠ Cập nhật Ads lỗi: ${e instanceof Error ? e.message : String(e)}`
+          );
       } finally {
         setRefreshingAds(false);
       }
@@ -127,16 +155,31 @@ export default function DashboardPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
-        }).then((x) => x.json());
+        }).then(safeJson);
         try {
           localStorage.setItem("taka:shopify-last-refresh", String(Date.now()));
         } catch {
           /* ignore quota */
         }
-        if (force || (r.refundsUpdated ?? 0) > 0 || (r.costsUpdated ?? 0) > 0)
+        if (force) {
+          const errors = Array.isArray(r.errors) ? (r.errors as string[]) : [];
+          setRefreshMsg(
+            r.error
+              ? `⚠ Cập nhật Basecost lỗi: ${r.error}`
+              : errors.length > 0
+              ? `⚠ ${errors.join(" · ")}`
+              : `✓ Đã cập nhật ${r.costsUpdated ?? 0} dòng giá vốn, ${
+                  r.refundsUpdated ?? 0
+                } hoàn tiền (${r.stores ?? 0} store).`
+          );
+        }
+        if (force || (Number(r.refundsUpdated) || 0) > 0 || (Number(r.costsUpdated) || 0) > 0)
           setData(await loadDashboard());
-      } catch {
-        /* ignore — dashboard still shows last-synced values */
+      } catch (e) {
+        if (force)
+          setRefreshMsg(
+            `⚠ Cập nhật Basecost lỗi: ${e instanceof Error ? e.message : String(e)}`
+          );
       } finally {
         if (force) setRefreshingCosts(false);
       }
@@ -199,6 +242,18 @@ export default function DashboardPage() {
           </div>
         }
       />
+
+      {refreshMsg && (
+        <div
+          className={`mb-4 rounded-lg px-4 py-2 text-sm ${
+            refreshMsg.startsWith("⚠")
+              ? "bg-rose-50 text-rose-700"
+              : "bg-emerald-50 text-emerald-700"
+          }`}
+        >
+          {refreshMsg}
+        </div>
+      )}
 
       {loading && !data ? (
         <DashboardSkeleton />
