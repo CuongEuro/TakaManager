@@ -539,7 +539,9 @@ export default function OptimizePage() {
                     </Badge>
                     <span className="min-w-0 flex-1">{a.message}</span>
                     <span className="shrink-0 text-xs text-slate-400">
-                      {new Date(a.createdAt).toLocaleDateString("vi-VN")}
+                      {new Date(a.createdAt).toLocaleDateString("vi-VN", {
+                        timeZone: "Asia/Tokyo",
+                      })}
                     </span>
                   </div>
                 ))}
@@ -563,7 +565,10 @@ export default function OptimizePage() {
                     <option value="">Lịch sử báo cáo…</option>
                     {reports.map((r) => (
                       <option key={r.id} value={r.id}>
-                        {new Date(r.createdAt).toLocaleString("vi-VN")} ·{" "}
+                        {new Date(r.createdAt).toLocaleString("vi-VN", {
+                          timeZone: "Asia/Tokyo",
+                        })}{" "}
+                        ·{" "}
                         {RANGE_PRESET_LABELS[r.preset as RangePreset] ?? r.preset}
                       </option>
                     ))}

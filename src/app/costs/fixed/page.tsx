@@ -56,7 +56,11 @@ const toYmd = (iso: string) => (iso ? iso.slice(0, 10) : "");
 function fmtDate(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
+  // Force Japan time — the browser's own locale/timezone (often Vietnam for
+  // this user) would otherwise silently shift displayed dates/times.
+  return isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleDateString("vi-VN", { timeZone: "Asia/Tokyo" });
 }
 
 export default function FixedCostsPage() {

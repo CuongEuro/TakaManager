@@ -48,7 +48,11 @@ interface PageResp {
 function fmtDate(iso?: string) {
   if (!iso) return "—";
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("vi-VN");
+  // Force Japan time — the browser's own locale/timezone (often Vietnam for
+  // this user) would otherwise silently shift displayed dates/times.
+  return isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleDateString("vi-VN", { timeZone: "Asia/Tokyo" });
 }
 
 // Calendar date (YYYY-MM-DD) as shown in the picker — the server resolves it
@@ -990,7 +994,9 @@ export default function StoresPage() {
                   </Td>
                   <Td className="text-slate-500">
                     {s.lastSyncedAt
-                      ? new Date(s.lastSyncedAt).toLocaleString("vi-VN")
+                      ? new Date(s.lastSyncedAt).toLocaleString("vi-VN", {
+                          timeZone: "Asia/Tokyo",
+                        })
                       : "—"}
                   </Td>
                   <Td>{formatPercent(s.taxRate)}</Td>
