@@ -409,7 +409,7 @@ export default function DashboardPage() {
 
           {/* Store breakdown + best sellers */}
           <div className="grid gap-4 lg:grid-cols-2">
-            <Card>
+            <Card className="min-w-0">
               <div className="mb-3 text-sm font-semibold text-slate-700">
                 Theo Store
               </div>
@@ -455,7 +455,7 @@ export default function DashboardPage() {
               )}
             </Card>
 
-            <Card>
+            <Card className="min-w-0">
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-sm font-semibold text-slate-700">
                   Top sản phẩm bán chạy
