@@ -344,7 +344,8 @@ export default function DashboardPage() {
             {data && data.channelEfficiency.length === 0 ? (
               <EmptyState message="Chưa có dữ liệu." />
             ) : (
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px] text-sm">
                 <thead>
                   <tr className="text-xs uppercase text-slate-400">
                     <th className="py-1 text-left">Kênh</th>
@@ -402,6 +403,7 @@ export default function DashboardPage() {
                   })}
                 </tbody>
               </table>
+              </div>
             )}
           </Card>
 
@@ -414,7 +416,8 @@ export default function DashboardPage() {
               {data && data.stores.length === 0 ? (
                 <EmptyState message="Chưa có store nào có dữ liệu." />
               ) : (
-                <table className="w-full text-sm">
+                <div className="overflow-x-auto">
+                <table className="w-full min-w-[440px] text-sm">
                   <thead>
                     <tr className="text-xs uppercase text-slate-400">
                       <th className="py-1 text-left">Store</th>
@@ -448,6 +451,7 @@ export default function DashboardPage() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               )}
             </Card>
 
