@@ -3,7 +3,7 @@
 // Pure-ish: fetches data for a [start, end) range, computes everything in memory.
 // ---------------------------------------------------------------------------
 import { prisma } from "@/lib/prisma";
-import { isoDay, DEFAULT_TZ, proratePeriodic } from "@/lib/dates";
+import { customRange, isoDay, DEFAULT_TZ, proratePeriodic } from "@/lib/dates";
 
 export interface PnlInput {
   organizationId: string; // tenant scope (required)
@@ -209,10 +209,17 @@ function proratedFixed(
   end: Date,
   tz: string
 ): number {
+  // Fixed-cost dates are calendar dates. Normalize legacy UTC-midnight rows and
+  // new rows alike to the start of that date in Japan time.
+  const startDay = isoDay(fc.startDate, tz);
+  const activeStart = customRange(startDay, startDay, tz).start;
   if (fc.billingCycle === "ONE_TIME")
-    return fc.startDate >= start && fc.startDate < end ? fc.amount : 0;
-  const s = start.getTime();
-  const e = Math.min(end.getTime(), (fc.endDate ?? end).getTime());
+    return activeStart >= start && activeStart < end ? fc.amount : 0;
+  const activeEnd = fc.endDate
+    ? customRange(isoDay(fc.endDate, tz), isoDay(fc.endDate, tz), tz).start
+    : end;
+  const s = Math.max(start.getTime(), activeStart.getTime());
+  const e = Math.min(end.getTime(), activeEnd.getTime());
   return e > s
     ? proratePeriodic(
         fc.amount,

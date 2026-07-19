@@ -17,6 +17,11 @@ import {
 } from "@/components/ui";
 import { AD_PLATFORMS, AD_PLATFORM_LABELS } from "@/lib/constants";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
+import {
+  addCalendarDays,
+  calendarDateInTimeZone,
+  calendarYMD,
+} from "@/lib/dates";
 
 interface AdAccount {
   id: string;
@@ -96,19 +101,6 @@ function waitForOnline(maxMs = 600000): Promise<void> {
   });
 }
 
-function startOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-
-// Calendar date (YYYY-MM-DD) in the BROWSER's local tz — not UTC — so day
-// boundaries match what the user sees and align with server-side bucketing.
-const dayStr = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
-
 /** Split [from, to] into ≤maxDays day-aligned chunks (oldest → newest). Long
  * windows are synced chunk-by-chunk so no single request times out. 14 days
  * keeps each Meta request light (avoids "Service temporarily unavailable"). */
@@ -118,15 +110,13 @@ function buildChunks(
   maxDays = 14
 ): { since: Date; until: Date }[] {
   const chunks: { since: Date; until: Date }[] = [];
-  let s = startOfDay(from);
-  const end = startOfDay(to);
+  let s = new Date(from);
+  const end = new Date(to);
   while (s.getTime() <= end.getTime()) {
-    const u = new Date(s);
-    u.setDate(u.getDate() + maxDays - 1);
+    let u = addCalendarDays(s, maxDays - 1);
     if (u.getTime() > end.getTime()) u.setTime(end.getTime());
     chunks.push({ since: new Date(s), until: new Date(u) });
-    s = new Date(u);
-    s.setDate(s.getDate() + 1);
+    s = addCalendarDays(u, 1);
   }
   return chunks;
 }
@@ -171,10 +161,10 @@ export default function AdAccountsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   // Sync window — chosen via the date-range picker (presets + calendar).
-  const [range, setRange] = useState<DateRange>(() => ({
-    from: new Date(Date.now() - 6 * 86400000),
-    to: new Date(),
-  }));
+  const [range, setRange] = useState<DateRange>(() => {
+    const today = calendarDateInTimeZone();
+    return { from: addCalendarDays(today, -6), to: today };
+  });
   // Bulk-sync progress + per-account results (browser-driven, one account at a time).
   const [syncProg, setSyncProg] = useState<{ done: number; total: number } | null>(null);
   const [syncResults, setSyncResults] = useState<SyncResult[]>([]);
@@ -336,8 +326,8 @@ export default function AdAccountsPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             accountId,
-            since: dayStr(since), // calendar dates → server buckets by day
-            until: dayStr(until),
+            since: calendarYMD(since),
+            until: calendarYMD(until),
             deep, // ad set-level detail only for the newest chunk (heavy)
           }),
         }).then((x) => x.json());

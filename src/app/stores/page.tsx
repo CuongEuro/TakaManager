@@ -19,6 +19,13 @@ import {
 } from "@/components/ui";
 import { formatPercent } from "@/lib/format";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
+import {
+  addCalendarDays,
+  calendarDateInTimeZone,
+  calendarYMD,
+  customRange,
+  DEFAULT_TZ,
+} from "@/lib/dates";
 
 interface SyncTotals {
   ok: boolean;
@@ -53,14 +60,6 @@ function fmtDate(iso?: string) {
   return isNaN(d.getTime())
     ? "—"
     : d.toLocaleDateString("vi-VN", { timeZone: "Asia/Tokyo" });
-}
-
-// Calendar date (YYYY-MM-DD) as shown in the picker — the server resolves it
-// in the store's timezone, so a picked day means that store-local day.
-function ymd(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
 }
 
 // Unknown total → asymptotic bar that approaches (but never hits) `cap` by page.
@@ -153,21 +152,25 @@ interface MonthChunk {
  *  stable across presets, so a month synced once can be skipped on re-run. */
 function buildMonthChunks(from: Date, to: Date): MonthChunk[] {
   const chunks: MonthChunk[] = [];
-  // `to` is the picker's local MIDNIGHT of the last day — bound chunks by the
-  // END of that day, or the last day's orders would be excluded entirely.
-  const toEnd = new Date(to.getTime() + 86400000 - 1);
-  let y = from.getFullYear();
-  let m = from.getMonth();
-  const endY = to.getFullYear();
-  const endM = to.getMonth();
+  let y = from.getUTCFullYear();
+  let m = from.getUTCMonth();
+  const endY = to.getUTCFullYear();
+  const endM = to.getUTCMonth();
   while (y < endY || (y === endY && m <= endM)) {
-    const monthStart = new Date(y, m, 1, 0, 0, 0, 0);
-    const monthEnd = new Date(y, m + 1, 0, 23, 59, 59, 999);
+    const monthStart = new Date(Date.UTC(y, m, 1, 12));
+    const monthEnd = new Date(Date.UTC(y, m + 1, 0, 12));
+    const sinceDay = monthStart < from ? from : monthStart;
+    const untilDay = monthEnd > to ? to : monthEnd;
+    const window = customRange(
+      calendarYMD(sinceDay),
+      calendarYMD(untilDay),
+      DEFAULT_TZ
+    );
     chunks.push({
       key: `${y}-${String(m + 1).padStart(2, "0")}`,
-      since: monthStart < from ? from : monthStart,
-      until: monthEnd > toEnd ? toEnd : monthEnd,
-      fullMonth: from <= monthStart && toEnd >= monthEnd,
+      since: window.start,
+      until: new Date(window.end.getTime() - 1),
+      fullMonth: from <= monthStart && to >= monthEnd,
     });
     if (++m > 11) {
       m = 0;
@@ -178,8 +181,7 @@ function buildMonthChunks(from: Date, to: Date): MonthChunk[] {
 }
 
 function currentMonthKey(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return calendarYMD(calendarDateInTimeZone()).slice(0, 7);
 }
 
 /** Fetch ONE page. Throws on any non-OK result so the caller can retry. */
@@ -401,13 +403,12 @@ async function syncStoreRefunds(
   let cursor: string | null = null;
   let updated = 0;
   let scanned = 0;
-  // `from`/`to` are local midnights of the picked days: `to` alone would STOP
-  // at 00:00 of the last day (skipping it entirely). Cover the whole last day
-  // (+24h) and pad a day each side for browser↔store timezone offsets — the
-  // patch is idempotent, so scanning slightly wider is harmless.
+  // Resolve the selected calendar days in Japan time, then pad one day each
+  // side. The refund patch is idempotent, so scanning slightly wider is safe.
   const DAY = 86400000;
-  const sinceStr = new Date(from.getTime() - DAY).toISOString();
-  const untilStr = new Date(to.getTime() + 2 * DAY).toISOString();
+  const window = customRange(calendarYMD(from), calendarYMD(to), DEFAULT_TZ);
+  const sinceStr = new Date(window.start.getTime() - DAY).toISOString();
+  const untilStr = new Date(window.end.getTime() + DAY).toISOString();
   for (let page = 1; page <= 8000; page++) {
     const body: Record<string, unknown> = cursor
       ? { storeId, since: sinceStr, until: untilStr, cursor }
@@ -460,10 +461,10 @@ export default function StoresPage() {
   );
   const [progress, setProgress] = useState<ProgressState | null>(null);
   // Khoảng ngày kéo dữ liệu — chọn qua bộ chọn ngày (preset + lịch).
-  const [range, setRange] = useState<DateRange>(() => ({
-    from: new Date(Date.now() - 6 * 86400000),
-    to: new Date(),
-  }));
+  const [range, setRange] = useState<DateRange>(() => {
+    const today = calendarDateInTimeZone();
+    return { from: addCalendarDays(today, -6), to: today };
+  });
   // Bỏ qua các tháng đã đồng bộ trước đó (resume). Tắt = kéo lại từ đầu.
   const [skipSynced, setSkipSynced] = useState(true);
 
@@ -719,9 +720,9 @@ export default function StoresPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               storeId: s.id,
-              // Calendar days — the server maps them to the store's timezone.
-              from: ymd(from),
-              to: ymd(to),
+              // Calendar days — the server maps them to Asia/Tokyo.
+              from: calendarYMD(from),
+              to: calendarYMD(to),
             }),
           }).then(safeJson);
           products += Number(r.products) || 0;

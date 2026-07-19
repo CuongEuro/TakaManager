@@ -56,6 +56,43 @@ function partsInTz(instant: Date, timeZone: string): { y: number; m: number; d: 
   return { y: wall.getUTCFullYear(), m: wall.getUTCMonth() + 1, d: wall.getUTCDate() };
 }
 
+/**
+ * A calendar-only date used by browser controls. Its Y/M/D live in the UTC
+ * fields, so rendering and calendar arithmetic never depend on the device's
+ * timezone. The actual report boundaries are still resolved separately in
+ * Asia/Tokyo by customRange/resolveRange.
+ */
+export function calendarDateInTimeZone(
+  instant: Date = new Date(),
+  timeZone: string = DEFAULT_TZ
+): Date {
+  const { y, m, d } = partsInTz(instant, timeZone);
+  return new Date(Date.UTC(y, m - 1, d, 12));
+}
+
+/** Parse YYYY-MM-DD into a timezone-independent calendar-date carrier. */
+export function parseCalendarDate(value: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [y, m, d] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(y, m - 1, d, 12));
+  return calendarYMD(parsed) === value ? parsed : null;
+}
+
+/** YYYY-MM-DD from a calendar-date carrier (not from a real-world instant). */
+export function calendarYMD(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(date.getUTCDate()).padStart(2, "0")}`;
+}
+
+/** Calendar arithmetic that is unaffected by the browser/server timezone. */
+export function addCalendarDays(date: Date, days: number): Date {
+  const result = new Date(date);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result;
+}
+
 /** UTC instant of wall-clock Y-M-D 00:00:00 in the given timezone. */
 function zonedMidnight(y: number, m: number, d: number, timeZone: string): Date {
   const guessUTC = Date.UTC(y, m - 1, d, 0, 0, 0);

@@ -19,11 +19,11 @@ import {
 } from "@/lib/format";
 import { Card, StatCard, PageHeader, Select, EmptyState, Badge } from "@/components/ui";
 import { DashboardChart } from "@/components/DashboardChart";
+import { calendarDateInTimeZone, calendarYMD, DEFAULT_TZ } from "@/lib/dates";
 
 interface DashboardResponse extends DashboardData {
   storeId: string | null;
   storeOptions: { id: string; name: string }[];
-  timezone: string;
 }
 
 // Human labels for the COGS-source breakdown (PnlResult.variableA.cogsBy).
@@ -33,12 +33,6 @@ const COGS_SOURCE_LABELS: Record<string, string> = {
   RULE_PER_ORDER: "từ quy tắc mỗi đơn",
   BASE_COST: "từ baseCost sản phẩm / quy tắc mỗi cái",
 };
-
-// Calendar date (YYYY-MM-DD) in local tz — matches what the picker shows.
-const dayStr = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
 
 // Parse a fetch response as JSON without crashing on non-JSON bodies — a
 // timed-out serverless function (504) returns an HTML/text error page, and
@@ -60,10 +54,10 @@ async function safeJson(res: Response): Promise<Record<string, unknown>> {
 
 export default function DashboardPage() {
   // Default to "today" (single-day range) on open.
-  const [range, setRange] = useState<DateRange>(() => ({
-    from: new Date(),
-    to: new Date(),
-  }));
+  const [range, setRange] = useState<DateRange>(() => {
+    const today = calendarDateInTimeZone();
+    return { from: today, to: today };
+  });
   const [storeId, setStoreId] = useState<string>("");
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -73,8 +67,8 @@ export default function DashboardPage() {
 
   const loadDashboard = useCallback(async (): Promise<DashboardResponse> => {
     const params = new URLSearchParams({
-      from: dayStr(range.from),
-      to: dayStr(range.to),
+      from: calendarYMD(range.from),
+      to: calendarYMD(range.to),
     });
     if (storeId) params.set("storeId", storeId);
     const r = await fetch(`/api/dashboard?${params}`);
@@ -133,7 +127,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const HOUR = 3600_000;
     const check = () => {
-      if (dayStr(range.to) !== dayStr(new Date())) return; // only for "today"
+      if (calendarYMD(range.to) !== calendarYMD(calendarDateInTimeZone())) return;
       const last = Number(localStorage.getItem("taka:ads-last-refresh") || 0);
       if (Date.now() - last >= HOUR) doAdsRefresh(false);
     };
@@ -199,7 +193,7 @@ export default function DashboardPage() {
   const pctOfCollected = (v: number) =>
     collectedBase > 0 ? `${((v / collectedBase) * 100).toFixed(1)}%` : "—";
   // Deep link to the full best-seller list, carrying the current range + store.
-  const productsHref = `/products?from=${dayStr(range.from)}&to=${dayStr(
+  const productsHref = `/products?from=${calendarYMD(range.from)}&to=${calendarYMD(
     range.to
   )}${storeId ? `&storeId=${storeId}` : ""}`;
 
@@ -207,9 +201,7 @@ export default function DashboardPage() {
     <div>
       <PageHeader
         title="Dashboard Lợi nhuận"
-        subtitle={`Tổng quan doanh thu, chi phí & lợi nhuận theo thời gian — múi giờ ${
-          data?.timezone ?? "Asia/Tokyo"
-        }.`}
+        subtitle={`Tổng quan doanh thu, chi phí & lợi nhuận theo thời gian — múi giờ ${DEFAULT_TZ} (GMT+9).`}
         actions={
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             <DateRangePicker value={range} onChange={setRange} />

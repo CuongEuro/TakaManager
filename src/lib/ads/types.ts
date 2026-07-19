@@ -1,3 +1,5 @@
+import { isoDay } from "@/lib/dates";
+
 // Normalized ad-insight row (one campaign × one day) used across all platforms.
 export interface AdInsight {
   date: string; // YYYY-MM-DD
@@ -96,10 +98,7 @@ export function adSpendDedupeKey(parts: {
 }
 
 export function ymd(d: Date): string {
-  const y = d.getFullYear();
-  const m = `${d.getMonth() + 1}`.padStart(2, "0");
-  const day = `${d.getDate()}`.padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return isoDay(d);
 }
 
 export function num(v: unknown): number {

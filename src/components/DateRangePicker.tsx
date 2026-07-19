@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { calendarDateInTimeZone } from "@/lib/dates";
 
 export interface DateRange {
   from: Date;
@@ -10,26 +11,26 @@ export interface DateRange {
 const DOW = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]; // Mon→Sun
 
 function startOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12)
+  );
 }
 function addDays(d: Date, n: number): Date {
   const x = startOfDay(d);
-  x.setDate(x.getDate() + n);
+  x.setUTCDate(x.getUTCDate() + n);
   return x;
 }
 function sameDay(a: Date, b: Date): boolean {
   return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
   );
 }
 function fmt(d: Date): string {
-  return `${String(d.getDate()).padStart(2, "0")}/${String(
-    d.getMonth() + 1
-  ).padStart(2, "0")}/${d.getFullYear()}`;
+  return `${String(d.getUTCDate()).padStart(2, "0")}/${String(
+    d.getUTCMonth() + 1
+  ).padStart(2, "0")}/${d.getUTCFullYear()}`;
 }
 const MONTHS = [
   "Th1", "Th2", "Th3", "Th4", "Th5", "Th6",
@@ -39,9 +40,15 @@ const MONTHS = [
 /** Presets, each computed relative to "today" (inclusive windows). */
 function presets(today: Date): { label: string; range: () => DateRange }[] {
   const t = startOfDay(today);
-  const firstThis = new Date(t.getFullYear(), t.getMonth(), 1);
-  const firstLast = new Date(t.getFullYear(), t.getMonth() - 1, 1);
-  const lastLast = new Date(t.getFullYear(), t.getMonth(), 0);
+  const firstThis = new Date(
+    Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1, 12)
+  );
+  const firstLast = new Date(
+    Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - 1, 1, 12)
+  );
+  const lastLast = new Date(
+    Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 0, 12)
+  );
   return [
     { label: "Hôm nay", range: () => ({ from: t, to: t }) },
     { label: "Hôm qua", range: () => ({ from: addDays(t, -1), to: addDays(t, -1) }) },
@@ -57,8 +64,10 @@ function presets(today: Date): { label: string; range: () => DateRange }[] {
 
 /** Build the 6×7 day grid (Mon-start) for a given month. */
 function monthGrid(view: Date): Date[] {
-  const first = new Date(view.getFullYear(), view.getMonth(), 1);
-  const offset = (first.getDay() + 6) % 7; // Mon=0 … Sun=6
+  const first = new Date(
+    Date.UTC(view.getUTCFullYear(), view.getUTCMonth(), 1, 12)
+  );
+  const offset = (first.getUTCDay() + 6) % 7; // Mon=0 … Sun=6
   const start = addDays(first, -offset);
   return Array.from({ length: 42 }, (_, i) => addDays(start, i));
 }
@@ -78,9 +87,9 @@ export function DateRangePicker({
   const [from, setFrom] = useState<Date>(value.from);
   const [to, setTo] = useState<Date | null>(value.to);
   const [view, setView] = useState<Date>(
-    new Date(value.to.getFullYear(), value.to.getMonth(), 1)
+    new Date(Date.UTC(value.to.getUTCFullYear(), value.to.getUTCMonth(), 1, 12))
   );
-  const max = startOfDay(maxDate ?? new Date());
+  const max = startOfDay(maxDate ?? calendarDateInTimeZone());
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // Sync local draft when opening or when the external value changes.
@@ -88,7 +97,9 @@ export function DateRangePicker({
     if (open) {
       setFrom(value.from);
       setTo(value.to);
-      setView(new Date(value.to.getFullYear(), value.to.getMonth(), 1));
+      setView(
+        new Date(Date.UTC(value.to.getUTCFullYear(), value.to.getUTCMonth(), 1, 12))
+      );
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -193,7 +204,16 @@ export function DateRangePicker({
                 <button
                   type="button"
                   onClick={() =>
-                    setView(new Date(view.getFullYear(), view.getMonth() - 1, 1))
+                    setView(
+                      new Date(
+                        Date.UTC(
+                          view.getUTCFullYear(),
+                          view.getUTCMonth() - 1,
+                          1,
+                          12
+                        )
+                      )
+                    )
                   }
                   className="rounded p-1 text-slate-500 hover:bg-slate-100"
                   aria-label="Tháng trước"
@@ -201,12 +221,21 @@ export function DateRangePicker({
                   ‹
                 </button>
                 <div className="text-sm font-semibold text-slate-700">
-                  {MONTHS[view.getMonth()]} {view.getFullYear()}
+                  {MONTHS[view.getUTCMonth()]} {view.getUTCFullYear()}
                 </div>
                 <button
                   type="button"
                   onClick={() =>
-                    setView(new Date(view.getFullYear(), view.getMonth() + 1, 1))
+                    setView(
+                      new Date(
+                        Date.UTC(
+                          view.getUTCFullYear(),
+                          view.getUTCMonth() + 1,
+                          1,
+                          12
+                        )
+                      )
+                    )
                   }
                   className="rounded p-1 text-slate-500 hover:bg-slate-100"
                   aria-label="Tháng sau"
@@ -225,7 +254,7 @@ export function DateRangePicker({
 
               <div className="grid grid-cols-7 gap-0.5">
                 {grid.map((d, i) => {
-                  const otherMonth = d.getMonth() !== view.getMonth();
+                  const otherMonth = d.getUTCMonth() !== view.getUTCMonth();
                   const future = d.getTime() > max.getTime();
                   const selected = inRange(d);
                   const isStart = sameDay(d, from);
@@ -248,7 +277,7 @@ export function DateRangePicker({
                           : "text-slate-700 hover:bg-slate-100"
                       }`}
                     >
-                      {d.getDate()}
+                      {d.getUTCDate()}
                     </button>
                   );
                 })}

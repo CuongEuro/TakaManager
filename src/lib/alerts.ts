@@ -6,18 +6,11 @@
 import { prisma } from "@/lib/prisma";
 import { computeStoreBreakEvens } from "@/lib/pnl";
 import { formatJPY, formatMultiplier } from "@/lib/format";
+import { isoDay } from "@/lib/dates";
 
 const DAY = 86400000;
 
 type DayRow = { spend: number; revenue: number };
-
-function isoDay(d: Date): string {
-  // Ad metric dates are stored at local midnight — bucket by that calendar day.
-  const y = d.getFullYear();
-  const m = `${d.getMonth() + 1}`.padStart(2, "0");
-  const day = `${d.getDate()}`.padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
 
 /** Evaluate alert rules for one org. Returns the number of alerts created.
  *  Dedupe: an identical (type, accountId, entityName) alert within the last

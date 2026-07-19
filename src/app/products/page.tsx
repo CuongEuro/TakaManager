@@ -17,6 +17,12 @@ import {
   Badge,
   Button,
 } from "@/components/ui";
+import {
+  addCalendarDays,
+  calendarDateInTimeZone,
+  calendarYMD,
+  parseCalendarDate,
+} from "@/lib/dates";
 
 interface ProductRow {
   productId: string | null;
@@ -47,15 +53,8 @@ interface TopProductsResponse {
   rows: ProductRow[];
 }
 
-const dayStr = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
-
 function parseYMD(v: string | null): Date | null {
-  if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
-  const [y, m, d] = v.split("-").map(Number);
-  return new Date(y, m - 1, d);
+  return v ? parseCalendarDate(v) : null;
 }
 
 const SORT_OPTIONS = [
@@ -85,11 +84,8 @@ function ProductsInner() {
     const from = parseYMD(sp.get("from"));
     const to = parseYMD(sp.get("to"));
     if (from && to) return { from, to };
-    const t = new Date();
-    t.setHours(0, 0, 0, 0);
-    const start = new Date(t);
-    start.setDate(start.getDate() - 29);
-    return { from: start, to: t };
+    const today = calendarDateInTimeZone();
+    return { from: addCalendarDays(today, -29), to: today };
   });
   const [storeId, setStoreId] = useState<string>(sp.get("storeId") ?? "");
   const [q, setQ] = useState("");
@@ -114,8 +110,8 @@ function ProductsInner() {
     let active = true;
     setLoading(true);
     const params = new URLSearchParams({
-      from: dayStr(range.from),
-      to: dayStr(range.to),
+      from: calendarYMD(range.from),
+      to: calendarYMD(range.to),
       page: String(page),
       pageSize: String(pageSize),
       sort,

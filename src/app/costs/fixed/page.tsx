@@ -22,6 +22,7 @@ import {
   BILLING_CYCLE_LABELS,
 } from "@/lib/constants";
 import { formatJPY } from "@/lib/format";
+import { calendarDateInTimeZone, calendarYMD, isoDay } from "@/lib/dates";
 
 interface FixedCost {
   id: string;
@@ -49,10 +50,9 @@ function monthlyEquivalent(amount: number, cycle: string): number {
 // Default "effective from" = first day of the current month, so a monthly cost
 // counts in full for the current month instead of only from its creation day.
 function firstOfMonth(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  return `${calendarYMD(calendarDateInTimeZone()).slice(0, 7)}-01`;
 }
-const toYmd = (iso: string) => (iso ? iso.slice(0, 10) : "");
+const toYmd = (iso: string) => (iso ? isoDay(new Date(iso)) : "");
 function fmtDate(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);

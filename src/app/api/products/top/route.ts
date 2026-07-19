@@ -41,14 +41,7 @@ export async function GET(req: NextRequest) {
   const page = Math.max(1, Number(sp.get("page")) || 1);
   const pageSize = Math.min(100, Math.max(5, Number(sp.get("pageSize")) || 20));
 
-  const tzStore = await prisma.store.findFirst({
-    where: storeId
-      ? { id: storeId, organizationId: session.oid }
-      : { organizationId: session.oid, active: true },
-    orderBy: { name: "asc" },
-    select: { timezone: true },
-  });
-  const timezone = tzStore?.timezone || DEFAULT_TZ;
+  const timezone = DEFAULT_TZ;
   const range =
     isYMD(from) && isYMD(to)
       ? customRange(from, to, timezone)

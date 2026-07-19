@@ -28,6 +28,7 @@ import {
   fetchTwitterAds,
   testTwitter,
 } from "@/lib/ads/twitter";
+import { customRange, isoDay } from "@/lib/dates";
 
 type AdAccountRow = {
   id: string;
@@ -203,7 +204,7 @@ async function syncHierarchy(
   for (const r of byKey.values()) {
     const entityId = adsetIdMap.get(r.adsetExternalId);
     if (!entityId) continue;
-    const date = new Date(`${r.date}T00:00:00`);
+    const date = new Date(`${r.date}T00:00:00Z`);
     const metric = {
       spend: r.spend * taxMultiplier,
       impressions: r.impressions,
@@ -211,6 +212,13 @@ async function syncHierarchy(
       conversions: r.conversions,
       revenue: r.revenue,
     };
+    const dayWindow = customRange(r.date, r.date);
+    await prisma.adMetric.deleteMany({
+      where: {
+        entityId,
+        date: { gte: dayWindow.start, lt: dayWindow.end },
+      },
+    });
     await prisma.adMetric.upsert({
       where: { entityId_date: { entityId, date } },
       create: { entityId, date, ...metric },
@@ -270,7 +278,7 @@ async function syncHierarchy(
     for (const r of adByKey.values()) {
       const entityId = adIdMap.get(r.adExternalId);
       if (!entityId) continue;
-      const date = new Date(`${r.date}T00:00:00`);
+      const date = new Date(`${r.date}T00:00:00Z`);
       const metric = {
         spend: r.spend * taxMultiplier,
         impressions: r.impressions,
@@ -278,6 +286,13 @@ async function syncHierarchy(
         conversions: r.conversions,
         revenue: r.revenue,
       };
+      const dayWindow = customRange(r.date, r.date);
+      await prisma.adMetric.deleteMany({
+        where: {
+          entityId,
+          date: { gte: dayWindow.start, lt: dayWindow.end },
+        },
+      });
       await prisma.adMetric.upsert({
         where: { entityId_date: { entityId, date } },
         create: { entityId, date, ...metric },
@@ -346,9 +361,9 @@ export async function syncAdAccount(
       : a.lastSyncedAt
       ? new Date(a.lastSyncedAt.getTime() - 2 * 86400000)
       : daysAgo(7);
-  // Day-aligned bounds for the idempotent delete (stored dates are local midnight).
-  const winStart = startOfDay(since);
-  const winEnd = endOfDay(until);
+  // Delete by Tokyo calendar-day boundaries. This also removes legacy daily
+  // rows written at a server-local midnight before UTC keys were standardized.
+  const window = customRange(isoDay(since), isoDay(until));
 
   try {
     const creds = toCreds(a);
@@ -471,7 +486,7 @@ export async function syncAdAccount(
         cur.revenue += ins.revenue;
       } else {
         agg.set(key, {
-          date: new Date(`${ins.date}T00:00:00`),
+          date: new Date(`${ins.date}T00:00:00Z`),
           storeId,
           campaignName: ins.campaignName,
           spend: ins.spend,
@@ -489,7 +504,7 @@ export async function syncAdAccount(
       where: {
         accountId: a.id,
         source: "API",
-        date: { gte: winStart, lte: winEnd },
+        date: { gte: window.start, lt: window.end },
       },
     });
     for (const [dedupeKey, row] of agg) {
@@ -590,22 +605,9 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
   throw lastErr;
 }
 
-// Parse a window bound. A date-only "YYYY-MM-DD" is read as LOCAL midnight (not
-// UTC, which is JS's default for bare dates) so it lines up with how daily ad
-// rows are stored (`${ymd}T00:00:00` local). Full ISO / Date pass through.
+// Date-only bounds and stored daily metrics use UTC midnight as a stable
+// database key. Provider request days are derived in Asia/Tokyo by ads/types.
 function parseDay(v: string | Date): Date {
   if (v instanceof Date) return v;
-  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00`) : new Date(v);
-}
-
-function startOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-
-function endOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00Z`) : new Date(v);
 }

@@ -451,8 +451,7 @@ export async function syncStoreCosts(
   let winStart: Date;
   let winEnd: Date; // exclusive
   if (opts.fromYMD && opts.toYMD) {
-    const tz = store?.timezone || DEFAULT_TZ;
-    const r = customRange(opts.fromYMD, opts.toYMD, tz);
+    const r = customRange(opts.fromYMD, opts.toYMD, DEFAULT_TZ);
     winStart = r.start;
     winEnd = r.end;
   } else {

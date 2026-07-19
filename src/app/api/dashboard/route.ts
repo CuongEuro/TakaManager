@@ -17,16 +17,9 @@ export async function GET(req: NextRequest) {
   const isYMD = (v: string | null): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const storeId = sp.get("storeId") || undefined;
 
-  // Day boundaries follow the store's timezone (default Japan). For "all stores"
-  // use the first store's tz (all the merchant's stores are typically same tz).
-  const tzStore = await prisma.store.findFirst({
-    where: storeId
-      ? { id: storeId, organizationId: session.oid }
-      : { organizationId: session.oid, active: true },
-    orderBy: { name: "asc" },
-    select: { timezone: true },
-  });
-  const timezone = tzStore?.timezone || DEFAULT_TZ;
+  // Reporting is fixed to Japan time for every store and every viewer. Do not
+  // derive this from the browser, server process, or a stale store setting.
+  const timezone = DEFAULT_TZ;
 
   // Custom from/to (calendar dates in the store tz) wins; else a named preset.
   const range =
