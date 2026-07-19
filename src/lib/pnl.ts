@@ -77,6 +77,7 @@ export interface StoreRow {
   netProfit: number;
   netMargin: number;
   roas: number;
+  breakEvenRoas: number;
 }
 
 export interface BestSeller {
@@ -112,6 +113,18 @@ export interface ChannelEfficiencyRow {
   cpa: number; // spend / orders
 }
 
+export interface ChannelTrendPoint {
+  date: string; // YYYY-MM-DD in the reporting timezone
+  storeId: string | null;
+  storeName: string;
+  channel: string;
+  spend: number;
+  revenue: number; // Shopify revenue attributed to the matching channel
+  orders: number; // Shopify orders attributed to the matching channel
+  roas: number;
+  cpa: number | null; // null when the channel has no attributed order that day
+}
+
 export interface DashboardData {
   summary: PnlResult;
   daily: DailyPoint[];
@@ -120,6 +133,7 @@ export interface DashboardData {
   channels: ChannelRow[];
   catalogs: CatalogRow[];
   channelEfficiency: ChannelEfficiencyRow[];
+  channelTrends: ChannelTrendPoint[];
 }
 
 // --- helpers --------------------------------------------------------------
@@ -413,6 +427,17 @@ export async function computeDashboard(
   const channels = buildChannelBreakdown(orders);
   const catalogs = buildCatalogBreakdown(orders);
   const channelEfficiency = buildChannelEfficiency(channels, adSpends);
+  const channelTrends = buildChannelTrends(
+    allStores,
+    orders.map((o) => ({
+      storeId: o.storeId,
+      date: o.date,
+      channel: o.channel,
+      revenue: orderRevenue(o),
+    })),
+    adSpends,
+    tz
+  );
 
   return {
     summary,
@@ -422,6 +447,7 @@ export async function computeDashboard(
     channels,
     catalogs,
     channelEfficiency,
+    channelTrends,
   };
 }
 
@@ -510,6 +536,73 @@ function buildChannelEfficiency(
     });
   }
   return rows.sort((a, b) => b.spend - a.spend || b.revenue - a.revenue);
+}
+
+/** Daily real-business efficiency per store and paid channel. Spend comes from
+ *  the ad platform; revenue/orders come from Shopify traffic attribution. */
+export function buildChannelTrends(
+  stores: { id: string; name: string }[],
+  orders: {
+    storeId: string;
+    date: Date;
+    channel: string | null;
+    revenue: number;
+  }[],
+  adSpends: {
+    storeId: string | null;
+    date: Date;
+    platform: string;
+    spend: number;
+  }[],
+  tz: string = DEFAULT_TZ
+): ChannelTrendPoint[] {
+  type Acc = {
+    date: string;
+    storeId: string | null;
+    channel: string;
+    spend: number;
+    revenue: number;
+    orders: number;
+  };
+
+  const storeNames = new Map(stores.map((s) => [s.id, s.name]));
+  const paidChannels = new Set(adSpends.map((a) => a.platform));
+  const rows = new Map<string, Acc>();
+  const get = (storeId: string | null, channel: string, date: string) => {
+    const key = `${storeId ?? "_"}|${channel}|${date}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = { date, storeId, channel, spend: 0, revenue: 0, orders: 0 };
+      rows.set(key, row);
+    }
+    return row;
+  };
+
+  for (const ad of adSpends) {
+    get(ad.storeId, ad.platform, isoDay(ad.date, tz)).spend += ad.spend;
+  }
+  for (const order of orders) {
+    if (!order.channel || !paidChannels.has(order.channel)) continue;
+    const row = get(order.storeId, order.channel, isoDay(order.date, tz));
+    row.revenue += order.revenue;
+    row.orders += 1;
+  }
+
+  return Array.from(rows.values())
+    .map((row) => ({
+      ...row,
+      storeName: row.storeId
+        ? storeNames.get(row.storeId) ?? "Store không còn tồn tại"
+        : "Chưa gán store",
+      roas: row.spend > 0 ? row.revenue / row.spend : 0,
+      cpa: row.orders > 0 ? row.spend / row.orders : null,
+    }))
+    .sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        a.storeName.localeCompare(b.storeName) ||
+        a.channel.localeCompare(b.channel)
+    );
 }
 
 function buildChannelBreakdown(orders: OrderWithItems[]): ChannelRow[] {
@@ -781,6 +874,7 @@ function buildStoreBreakdown(
       fixed += fc.storeId === null ? amt * share : amt;
     }
     const netProfit = revenue - varA - adSpend - fixed;
+    const grossProfit = revenue - varA;
     rows.push({
       storeId: s.id,
       storeName: s.name,
@@ -789,6 +883,7 @@ function buildStoreBreakdown(
       netProfit,
       netMargin: revenue > 0 ? netProfit / revenue : 0,
       roas: adSpend > 0 ? attributed / adSpend : 0,
+      breakEvenRoas: grossProfit > 0 ? revenue / grossProfit : 0,
     });
   }
   return rows.sort((a, b) => b.revenue - a.revenue);

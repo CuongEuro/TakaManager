@@ -19,6 +19,7 @@ import {
 } from "@/lib/format";
 import { Card, StatCard, PageHeader, Select, EmptyState, Badge } from "@/components/ui";
 import { DashboardChart } from "@/components/DashboardChart";
+import { ChannelEfficiencyTrendChart } from "@/components/ChannelEfficiencyTrendChart";
 import { calendarDateInTimeZone, calendarYMD, DEFAULT_TZ } from "@/lib/dates";
 
 interface DashboardResponse extends DashboardData {
@@ -396,6 +397,28 @@ export default function DashboardPage() {
               </div>
             </Card>
           </div>
+
+          <Card>
+            <div className="mb-1 text-sm font-semibold text-slate-700">
+              Diễn biến hiệu quả Ads theo Store/Kênh
+            </div>
+            <p className="mb-3 text-xs text-slate-400">
+              So sánh ROAS và CPA thực tế từ chi phí nền tảng Ads với đơn hàng Shopify.
+            </p>
+            {data && data.channelTrends.length > 0 ? (
+              <ChannelEfficiencyTrendChart
+                data={data.channelTrends}
+                dates={data.daily.map((point) => point.date)}
+                dashboardStoreId={data.storeId}
+                breakEvenRoas={s.metrics.breakEvenRoas}
+                storeBreakEvens={Object.fromEntries(
+                  data.stores.map((row) => [row.storeId, row.breakEvenRoas])
+                )}
+              />
+            ) : (
+              <EmptyState message="Chưa có dữ liệu Ads theo store và kênh trong khoảng này." />
+            )}
+          </Card>
 
           {/* Channel efficiency / ROAS — the Phase 3 payoff */}
           <Card>
