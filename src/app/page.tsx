@@ -155,7 +155,14 @@ export default function DashboardPage() {
         const r = await fetch("/api/shopify/refresh", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify(
+            force
+              ? {
+                  from: calendarYMD(range.from),
+                  to: calendarYMD(range.to),
+                }
+              : {}
+          ),
         }).then(safeJson);
         try {
           localStorage.setItem("taka:shopify-last-refresh", String(Date.now()));
@@ -188,7 +195,7 @@ export default function DashboardPage() {
         if (force) setRefreshingCosts(false);
       }
     },
-    [loadDashboard]
+    [loadDashboard, range]
   );
   useAutoRefresh("taka:shopify-last-refresh", doShopifyRefresh);
 
@@ -226,7 +233,7 @@ export default function DashboardPage() {
             <button
               onClick={refreshCostsNow}
               disabled={refreshingCosts}
-              title="Tự cập nhật tối đa 1 lần/giờ. Bấm để kéo lại Cost per item (Basecost) & hoàn tiền từ Shopify ngay bây giờ."
+              title="Tự cập nhật gần đây mỗi giờ. Bấm để kéo lại Cost per item (Basecost) theo đúng khoảng ngày đang chọn."
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
               {refreshingCosts ? "Đang cập nhật Basecost…" : "🔄 Cập nhật Basecost"}

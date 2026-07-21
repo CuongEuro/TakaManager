@@ -446,6 +446,10 @@ export async function findMissingBasecosts(
 ): Promise<MissingBasecostReport> {
   const where = {
     unitCost: { lte: 0 },
+    // Tips, donations and other custom order charges are not Shopify products,
+    // cannot carry inventory Cost per item, and must not be reported as missing
+    // product Basecost.
+    productId: { not: null },
     order: {
       organizationId,
       date: { gte: opts.start, lt: opts.end },

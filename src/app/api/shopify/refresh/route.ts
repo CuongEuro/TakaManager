@@ -24,6 +24,10 @@ export async function POST(req: NextRequest) {
 
   const b = await req.json().catch(() => ({} as Record<string, unknown>));
   const sinceDays = b.sinceDays ? Math.min(14, Number(b.sinceDays)) : 2;
+  const isYMD = (value: unknown): value is string =>
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const fromYMD = isYMD(b.from) ? b.from : undefined;
+  const toYMD = isYMD(b.to) ? b.to : undefined;
 
   const stores = await prisma.store.findMany({
     where: { organizationId: session.oid, active: true },
@@ -49,8 +53,12 @@ export async function POST(req: NextRequest) {
       const costs =
         s.cogsSource === "COST_PER_ITEM"
           ? await syncStoreCosts(s.id, session.oid, {
-              since: new Date(Date.now() - sinceDays * 86400000),
-              until: new Date(),
+              ...(fromYMD && toYMD
+                ? { fromYMD, toYMD }
+                : {
+                    since: new Date(Date.now() - sinceDays * 86400000),
+                    until: new Date(),
+                  }),
             })
           : null;
       return { refunds, costs };

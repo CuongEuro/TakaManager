@@ -391,15 +391,27 @@ query ProductCosts($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on Product {
       id
-      variants(first: 10) { nodes { inventoryItem { unitCost { amount } } } }
+      variants(first: 100) { nodes { inventoryItem { unitCost { amount } } } }
     }
   }
 }`;
 
-/** Fetch each product's "Cost per item": scan the first 10 variants and take
- *  the first cost > 0 — POD variants usually share one cost, but variant #1
- *  alone may have none, which used to lose the whole product. Batched by 25 to
- *  stay under Shopify's 1,000-point query cost cap. Needs read_inventory. */
+type VariantCostNode = {
+  inventoryItem: { unitCost: { amount: string } | null } | null;
+};
+
+export function firstPositiveUnitCost(variants: VariantCostNode[]): number | null {
+  for (const variant of variants) {
+    const cost = num(variant?.inventoryItem?.unitCost?.amount);
+    if (cost > 0) return cost;
+  }
+  return null;
+}
+
+/** Fetch each product's "Cost per item": scan up to 100 variants and take the
+ *  first cost > 0. Apparel often has more than 10 size/color variants, so the
+ *  old limit produced false missing-cost warnings. Batched by 5 to stay under
+ *  Shopify's GraphQL query-cost cap. Needs read_inventory. */
 export async function fetchProductCosts(
   creds: ShopifyCreds,
   productGids: string[]
@@ -408,8 +420,8 @@ export async function fetchProductCosts(
   if (productGids.length === 0) return out;
   const c = await resolveCreds(creds);
   const chunks: string[][] = [];
-  for (let i = 0; i < productGids.length; i += 25)
-    chunks.push(productGids.slice(i, i + 25));
+  for (let i = 0; i < productGids.length; i += 5)
+    chunks.push(productGids.slice(i, i + 5));
 
   // Chunks are independent GraphQL calls — a large catalog run one-by-one was
   // slow enough (network round-trip × chunk count) to trip Vercel's 60s
@@ -424,7 +436,7 @@ export async function fetchProductCosts(
           nodes: ({
             id: string;
             variants: {
-              nodes: { inventoryItem: { unitCost: { amount: string } | null } | null }[];
+              nodes: VariantCostNode[];
             };
           } | null)[];
         }>(c, PRODUCT_COSTS_QUERY, { ids })
@@ -433,13 +445,8 @@ export async function fetchProductCosts(
     for (const data of results) {
       for (const n of data.nodes) {
         if (!n?.id) continue;
-        for (const v of n.variants?.nodes ?? []) {
-          const cost = num(v?.inventoryItem?.unitCost?.amount);
-          if (cost > 0) {
-            out.set(n.id, cost);
-            break;
-          }
-        }
+        const cost = firstPositiveUnitCost(n.variants?.nodes ?? []);
+        if (cost != null) out.set(n.id, cost);
       }
     }
   }
