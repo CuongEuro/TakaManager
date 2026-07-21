@@ -5,8 +5,8 @@ import { registerOrderWebhooks, ShopifyCreds } from "@/lib/shopify";
 
 export const dynamic = "force-dynamic";
 
-// Turn on real-time sync for a store: subscribe its Shopify app to
-// orders/create + orders/updated webhooks pointing at /api/shopify/webhook.
+// Turn on real-time sync for a store: subscribe its Shopify app to order
+// create/update plus inventory cost updates at /api/shopify/webhook.
 export async function POST(req: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -45,8 +45,16 @@ export async function POST(req: NextRequest) {
 
   try {
     const r = await registerOrderWebhooks(creds, callbackUrl);
-    if (r.created === 0 && r.errors.length) {
-      return NextResponse.json({ ok: false, error: r.errors.join("; ") });
+    if (r.errors.length) {
+      await prisma.store.update({
+        where: { id: store.id },
+        data: { webhooksEnabled: false },
+      });
+      return NextResponse.json({
+        ok: false,
+        created: r.created,
+        error: r.errors.join("; "),
+      });
     }
     await prisma.store.update({
       where: { id: store.id },

@@ -233,7 +233,7 @@ export default function DashboardPage() {
             <button
               onClick={refreshCostsNow}
               disabled={refreshingCosts}
-              title="Tự cập nhật gần đây mỗi giờ. Bấm để kéo lại Cost per item (Basecost) theo đúng khoảng ngày đang chọn."
+              title="Chỉ truy vấn và bổ sung Basecost còn thiếu trong khoảng ngày đang chọn; không ghi đè chi phí đã lưu."
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
               {refreshingCosts ? "Đang cập nhật Basecost…" : "🔄 Cập nhật Basecost"}

@@ -1,9 +1,17 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { verifyWebhookHmac, normalizeWebhookOrder } from "@/lib/shopify";
-import { ingestOrders, syncOrderCosts } from "@/lib/sync";
+import {
+  verifyWebhookHmac,
+  normalizeInventoryCostWebhook,
+  normalizeWebhookOrder,
+} from "@/lib/shopify";
+import {
+  backfillMissingInventoryCost,
+  ingestWebhookOrder,
+} from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // Public endpoint — authenticated by Shopify's HMAC signature, NOT a session.
 // (Allow-listed in src/middleware.ts.) Registered for orders/create + updated.
@@ -30,28 +38,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "bad hmac" }, { status: 401 });
   }
 
-  // Only order topics carry an order payload we ingest.
-  if (topic.startsWith("orders/")) {
+  // Acknowledge quickly; Shopify expects a response within five seconds. Next's
+  // after() keeps the bounded database/API work alive after the response.
+  after(async () => {
     try {
       const payload = JSON.parse(raw);
-      const norm = normalizeWebhookOrder(payload);
-      await ingestOrders(store.id, store.organizationId, [norm]);
-      // Webhook payloads do not contain inventory unitCost. Fill it immediately
-      // for COST_PER_ITEM stores so new/updated orders do not wait for a manual
-      // refresh. Missing Shopify costs remain zero and appear in the dashboard
-      // warning list.
-      try {
-        await syncOrderCosts(store.id, store.organizationId, norm.externalId);
-      } catch (costError) {
-        console.error("Shopify webhook cost refresh error:", costError);
+      if (topic.startsWith("orders/")) {
+        await ingestWebhookOrder(
+          store.id,
+          store.organizationId,
+          normalizeWebhookOrder(payload)
+        );
+      } else if (topic === "inventory_items/update") {
+        const inventory = normalizeInventoryCostWebhook(payload);
+        if (inventory) {
+          await backfillMissingInventoryCost(
+            store.id,
+            store.organizationId,
+            inventory.inventoryItemId,
+            inventory.unitCost
+          );
+        }
       }
     } catch (e) {
-      // Return 200 anyway so Shopify doesn't enter an aggressive retry loop;
-      // the error is logged for inspection.
-      console.error("Shopify webhook ingest error:", e);
+      console.error("Shopify webhook processing error:", e);
     }
-  }
+  });
 
-  // Always 200 once HMAC is valid so Shopify marks delivery successful.
+  // Always 200 once HMAC is valid; processing continues in after().
   return NextResponse.json({ ok: true });
 }

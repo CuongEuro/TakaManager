@@ -16,8 +16,11 @@ import {
   fetchOrdersSince,
   fetchProductImages,
   fetchRefundsPage,
-  fetchProductCosts,
+  fetchOrderLinesForCosts,
+  fetchVariantCosts,
+  preserveUnitCostSnapshot,
   ShopifyCreds,
+  ShopifyOrderLineNorm,
   ShopifyOrderNorm,
 } from "@/lib/shopify";
 import { customRange, DEFAULT_TZ } from "@/lib/dates";
@@ -117,16 +120,63 @@ async function upsertOrders(
   productMap: Map<string, string>
 ): Promise<void> {
   for (const o of orders) {
-    const lineItemData = o.lineItems.map((li) => ({
-      productId: li.externalProductId
+    const existingOrder = await prisma.order.findUnique({
+      where: { storeId_externalId: { storeId, externalId: o.externalId } },
+      select: {
+        lineItems: {
+          select: {
+            id: true,
+            productId: true,
+            externalLineItemId: true,
+            externalVariantId: true,
+            inventoryItemId: true,
+            title: true,
+            image: true,
+            price: true,
+            unitCost: true,
+          },
+        },
+      },
+    });
+    const existing = existingOrder?.lineItems ?? [];
+    const used = new Set<string>();
+
+    const takeExisting = (li: ShopifyOrderLineNorm, productId: string | null) => {
+      const match = existing.find((old) => {
+        if (used.has(old.id)) return false;
+        if (li.externalLineItemId && old.externalLineItemId)
+          return li.externalLineItemId === old.externalLineItemId;
+        if (li.externalVariantId && old.externalVariantId)
+          return li.externalVariantId === old.externalVariantId;
+        return (
+          old.productId === productId &&
+          old.title === li.title &&
+          Math.abs(old.price - li.price) < 0.0001
+        );
+      });
+      if (match) used.add(match.id);
+      return match;
+    };
+
+    const lineItemData = o.lineItems.map((li) => {
+      const productId = li.externalProductId
         ? productMap.get(li.externalProductId) ?? null
-        : null,
-      title: li.title,
-      image: li.image,
-      quantity: li.quantity,
-      price: li.price,
-      unitCost: li.unitCost,
-    }));
+        : null;
+      const old = takeExisting(li, productId);
+      return {
+        productId,
+        externalLineItemId: li.externalLineItemId ?? old?.externalLineItemId ?? null,
+        externalVariantId: li.externalVariantId ?? old?.externalVariantId ?? null,
+        inventoryItemId: li.inventoryItemId ?? old?.inventoryItemId ?? null,
+        title: li.title,
+        image: li.image ?? old?.image ?? null,
+        quantity: li.quantity,
+        price: li.price,
+        // A positive cost is a historical snapshot. Order edits/re-syncs may
+        // add metadata, but must never replace that snapshot with today's cost.
+        unitCost: preserveUnitCostSnapshot(old?.unitCost ?? 0, li.unitCost),
+      };
+    });
 
     const common = {
       date: o.date,
@@ -201,6 +251,73 @@ export async function ingestOrders(
   const productMap = await upsertProductsFromOrders(orders, storeId, organizationId);
   await upsertOrders(orders, storeId, organizationId, productMap);
   return { products: productMap.size, orders: orders.length };
+}
+
+/** Enrich a webhook order from its exact variant IDs, then ingest it once. The
+ * order is still saved if Shopify's inventory query fails; a later missing-only
+ * backfill can repair those zero-cost lines. */
+export async function ingestWebhookOrder(
+  storeId: string,
+  organizationId: string,
+  order: ShopifyOrderNorm
+): Promise<{ products: number; orders: number; costsResolved: number }> {
+  const { store, creds } = await storeCreds(storeId, organizationId);
+  let costsResolved = 0;
+  let enriched = order;
+  if (creds && store?.cogsSource === "COST_PER_ITEM") {
+    try {
+      const costs = await fetchVariantCosts(
+        creds,
+        order.lineItems
+          .map((line) => line.externalVariantId)
+          .filter((id): id is string => !!id)
+      );
+      enriched = {
+        ...order,
+        lineItems: order.lineItems.map((line) => {
+          const cost = line.externalVariantId
+            ? costs.get(line.externalVariantId)
+            : undefined;
+          if (cost && cost.unitCost > 0) costsResolved++;
+          return cost
+            ? {
+                ...line,
+                inventoryItemId: cost.inventoryItemId,
+                unitCost: cost.unitCost,
+              }
+            : line;
+        }),
+      };
+    } catch (error) {
+      console.error("Shopify webhook variant cost lookup error:", error);
+    }
+  }
+  const result = await ingestOrders(storeId, organizationId, [enriched]);
+  return { ...result, costsResolved };
+}
+
+/** An inventory cost webhook repairs only rows that are still missing cost.
+ * Existing positive snapshots intentionally remain unchanged. */
+export async function backfillMissingInventoryCost(
+  storeId: string,
+  organizationId: string,
+  inventoryItemId: string,
+  unitCost: number
+): Promise<number> {
+  if (unitCost <= 0) return 0;
+  const result = await prisma.orderLineItem.updateMany({
+    where: {
+      inventoryItemId,
+      unitCost: { lte: 0 },
+      order: {
+        storeId,
+        organizationId,
+        store: { cogsSource: "COST_PER_ITEM" },
+      },
+    },
+    data: { unitCost },
+  });
+  return result.count;
 }
 
 // --- page-by-page sync (browser-driven) ------------------------------------
@@ -548,18 +665,30 @@ export async function syncStoreCosts(
   const dateWindow = { gte: winStart, lt: winEnd };
 
   try {
-    // Distinct products that appear in this store's orders in the window.
-    const grouped = await prisma.orderLineItem.groupBy({
-      by: ["productId"],
+    // Read only rows that are genuinely missing Basecost.
+    const missingLines = await prisma.orderLineItem.findMany({
       where: {
+        unitCost: { lte: 0 },
         productId: { not: null },
         order: { storeId, date: dateWindow },
       },
+      select: {
+        id: true,
+        productId: true,
+        externalLineItemId: true,
+        externalVariantId: true,
+        title: true,
+        quantity: true,
+        price: true,
+        product: { select: { externalId: true } },
+        order: { select: { externalId: true } },
+      },
     });
-    const pids = grouped.map((g) => g.productId).filter((x): x is string => !!x);
-    // No orders in the window → nothing to patch (the UI turns products:0
-    // into a "sync orders first" hint).
-    if (pids.length === 0) {
+    const productIds = new Set(
+      missingLines.map((line) => line.productId).filter((id): id is string => !!id)
+    );
+    // Nothing missing in the selected window.
+    if (missingLines.length === 0) {
       const missing = await findMissingBasecosts(organizationId, {
         start: winStart,
         end: winEnd,
@@ -574,24 +703,82 @@ export async function syncStoreCosts(
       };
     }
 
-    const products = await prisma.product.findMany({
-      where: { id: { in: pids }, externalId: { not: null } },
-      select: { id: true, externalId: true },
-    });
-    const costMap = await fetchProductCosts(
-      creds,
-      products.map((p) => p.externalId!).filter(Boolean)
-    );
-
     let updated = 0;
-    for (const p of products) {
-      const cost = p.externalId ? costMap.get(p.externalId) : undefined;
-      if (cost == null || cost <= 0) continue;
+    const resolvedProducts = new Set<string>();
+    const variantCosts = await fetchVariantCosts(
+      creds,
+      missingLines
+        .map((line) => line.externalVariantId)
+        .filter((id): id is string => !!id)
+    );
+    for (const [variantId, cost] of variantCosts) {
+      const positive = cost.unitCost > 0;
       const res = await prisma.orderLineItem.updateMany({
-        where: { productId: p.id, order: { storeId, date: dateWindow } },
-        data: { unitCost: cost },
+        where: {
+          externalVariantId: variantId,
+          unitCost: { lte: 0 },
+          order: { storeId, date: dateWindow },
+        },
+        data: {
+          inventoryItemId: cost.inventoryItemId,
+          ...(positive ? { unitCost: cost.unitCost } : {}),
+        },
       });
-      updated += res.count;
+      if (positive) {
+        updated += res.count;
+        for (const line of missingLines)
+          if (line.externalVariantId === variantId && line.productId)
+            resolvedProducts.add(line.productId);
+      }
+    }
+
+    // Legacy rows have no stored variant ID. Query only their Shopify orders
+    // and match the exact line, instead of scanning the entire product catalog.
+    const legacy = missingLines.filter((line) => !line.externalVariantId);
+    const orderLines = await fetchOrderLinesForCosts(
+      creds,
+      legacy
+        .map((line) => line.order.externalId)
+        .filter((id): id is string => !!id)
+    );
+    const usedExternalLines = new Set<string>();
+    for (const local of legacy) {
+      const orderId = local.order.externalId;
+      if (!orderId) continue;
+      const candidates = orderLines.get(orderId) ?? [];
+      const exact = local.externalLineItemId
+        ? candidates.find(
+            (line) =>
+              !usedExternalLines.has(line.externalLineItemId) &&
+              line.externalLineItemId === local.externalLineItemId
+          )
+        : undefined;
+      const matched =
+        exact ??
+        candidates.find(
+          (line) =>
+            !usedExternalLines.has(line.externalLineItemId) &&
+            line.externalProductId === local.product?.externalId &&
+            line.title === local.title &&
+            line.quantity === local.quantity &&
+            Math.abs(line.price - local.price) < 0.0001
+        );
+      if (!matched) continue;
+      usedExternalLines.add(matched.externalLineItemId);
+      const positive = matched.unitCost > 0;
+      const res = await prisma.orderLineItem.updateMany({
+        where: { id: local.id, unitCost: { lte: 0 } },
+        data: {
+          externalLineItemId: matched.externalLineItemId,
+          externalVariantId: matched.externalVariantId,
+          inventoryItemId: matched.inventoryItemId,
+          ...(positive ? { unitCost: matched.unitCost } : {}),
+        },
+      });
+      if (positive) {
+        updated += res.count;
+        if (local.productId) resolvedProducts.add(local.productId);
+      }
     }
     const missing = await findMissingBasecosts(organizationId, {
       start: winStart,
@@ -601,8 +788,8 @@ export async function syncStoreCosts(
     return {
       ...base,
       ok: true,
-      products: products.length,
-      withCost: costMap.size,
+      products: productIds.size,
+      withCost: resolvedProducts.size,
       updated,
       missingCount: missing.total,
       missingProducts: missing.items,
@@ -619,50 +806,6 @@ export async function syncStoreCosts(
       };
     return { ...base, ok: false, error: m };
   }
-}
-
-/** Best-effort targeted cost refresh for a newly created/updated webhook order.
- * It avoids waiting for the hourly dashboard refresh or the daily cron. */
-export async function syncOrderCosts(
-  storeId: string,
-  organizationId: string,
-  orderExternalId: string
-): Promise<number> {
-  const { store, creds } = await storeCreds(storeId, organizationId);
-  if (!creds || store?.cogsSource !== "COST_PER_ITEM") return 0;
-
-  const order = await prisma.order.findFirst({
-    where: { storeId, organizationId, externalId: orderExternalId },
-    select: {
-      id: true,
-      lineItems: {
-        where: { productId: { not: null } },
-        select: {
-          productId: true,
-          product: { select: { externalId: true } },
-        },
-      },
-    },
-  });
-  if (!order) return 0;
-
-  const products = new Map<string, string>();
-  for (const line of order.lineItems) {
-    if (line.productId && line.product?.externalId)
-      products.set(line.productId, line.product.externalId);
-  }
-  const costs = await fetchProductCosts(creds, [...products.values()]);
-  let updated = 0;
-  for (const [productId, externalId] of products) {
-    const cost = costs.get(externalId);
-    if (!cost || cost <= 0) continue;
-    const result = await prisma.orderLineItem.updateMany({
-      where: { orderId: order.id, productId },
-      data: { unitCost: cost },
-    });
-    updated += result.count;
-  }
-  return updated;
 }
 
 // --- whole-window sync (cron / API) ----------------------------------------

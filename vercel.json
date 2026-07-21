@@ -1,4 +1,5 @@
 {
+  "buildCommand": "npm run db:push && npm run build",
   "crons": [
     { "path": "/api/cron/sync", "schedule": "0 1 * * *" }
   ]

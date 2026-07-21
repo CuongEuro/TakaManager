@@ -334,19 +334,25 @@ model Order {
 }
 
 model OrderLineItem {
-  id        String   @id @default(cuid())
-  orderId   String
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productId String?
-  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
-  title     String
-  image     String?
-  quantity  Int      @default(1)
-  price     Float    @default(0) // unit price (tax-incl, from Shopify)
-  unitCost  Float    @default(0) // Shopify "Cost per item" (variant), snapshot at sync
+  id                 String   @id @default(cuid())
+  orderId            String
+  order              Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId          String?
+  product            Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  externalLineItemId String? // Shopify LineItem GID; stable key across order updates
+  externalVariantId  String? // exact Shopify ProductVariant GID used for Cost per item
+  inventoryItemId    String? // Shopify InventoryItem GID used by inventory cost webhooks
+  title              String
+  image              String?
+  quantity           Int      @default(1)
+  price              Float    @default(0) // unit price (tax-incl, from Shopify)
+  unitCost           Float    @default(0) // immutable positive snapshot; only missing costs are backfilled
 
   @@index([orderId])
   @@index([productId])
+  @@index([externalLineItemId])
+  @@index([externalVariantId])
+  @@index([inventoryItemId])
 }
 
 // ---------------------------------------------------------------------------

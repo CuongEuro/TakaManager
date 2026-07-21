@@ -800,7 +800,7 @@ export default function StoresPage() {
         id,
         ok: !!r.ok,
         text: r.ok
-          ? "✓ Đã bật tự động đồng bộ (webhook): đơn mới/cập nhật từ Shopify sẽ tự về, không cần bấm Sync."
+          ? "✓ Đã bật tự động đồng bộ: đơn hàng và Basecost mới từ Shopify sẽ tự cập nhật."
           : `✗ ${r.error ?? "Không bật được webhook"}`,
       });
       await load();
@@ -1106,7 +1106,7 @@ export default function StoresPage() {
                         title={
                           s.webhooksEnabled
                             ? "Tự động đang bật — bấm để đăng ký lại"
-                            : "Bật tự động đồng bộ đơn (webhook)"
+                            : "Bật tự động đồng bộ đơn và Basecost"
                         }
                       >
                         {s.webhooksEnabled ? "🔔 Đang bật" : "🔔 Tự động"}

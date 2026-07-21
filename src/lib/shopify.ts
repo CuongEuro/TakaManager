@@ -21,6 +21,9 @@ export interface ShopifyCreds {
 
 export interface ShopifyOrderLineNorm {
   externalProductId: string | null;
+  externalLineItemId: string | null;
+  externalVariantId: string | null;
+  inventoryItemId: string | null;
   title: string;
   image: string | null;
   quantity: number;
@@ -114,6 +117,11 @@ function num(v: unknown): number {
   return isNaN(n) ? 0 : n;
 }
 
+/** Positive order-line cost is an immutable historical snapshot. */
+export function preserveUnitCostSnapshot(stored: number, incoming: number): number {
+  return stored > 0 ? stored : incoming;
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Transient HTTP statuses worth retrying (gateway hiccups + rate limit).
@@ -198,9 +206,9 @@ function ordersQuery(journey: boolean, cost: boolean): string {
   const journeyBlock = journey
     ? `customerJourneySummary { lastVisit { source sourceType referrerUrl utmParameters { source medium campaign } } }`
     : "";
-  const costBlock = cost
-    ? `variant { inventoryItem { unitCost { amount } } }`
-    : "";
+  const variantBlock = cost
+    ? `variant { id inventoryItem { id unitCost { amount } } }`
+    : `variant { id }`;
   return `
 query Orders($cursor: String, $query: String) {
   orders(first: 25, after: $cursor, query: $query, sortKey: CREATED_AT) {
@@ -217,11 +225,12 @@ query Orders($cursor: String, $query: String) {
       ${journeyBlock}
       lineItems(first: 50) {
         nodes {
+          id
           title
           quantity
           originalUnitPriceSet { shopMoney { amount } }
           product { id featuredImage { url } }
-          ${costBlock}
+          ${variantBlock}
         }
       }
     }
@@ -255,11 +264,18 @@ interface OrdersResp {
       customerJourneySummary: { lastVisit: Visit | null } | null;
       lineItems: {
         nodes: {
+          id: string;
           title: string;
           quantity: number;
           originalUnitPriceSet: { shopMoney: { amount: string } } | null;
           product: { id: string; featuredImage: { url: string } | null } | null;
-          variant: { inventoryItem: { unitCost: { amount: string } | null } | null } | null;
+          variant: {
+            id: string;
+            inventoryItem?: {
+              id: string;
+              unitCost: { amount: string } | null;
+            } | null;
+          } | null;
         }[];
       };
     }[];
@@ -321,6 +337,9 @@ export function normalizeOrder(
     units += li.quantity;
     return {
       externalProductId: li.product?.id ?? null,
+      externalLineItemId: li.id,
+      externalVariantId: li.variant?.id ?? null,
+      inventoryItemId: li.variant?.inventoryItem?.id ?? null,
       title: li.title,
       image: li.product?.featuredImage?.url ?? null,
       quantity: li.quantity,
@@ -381,6 +400,144 @@ export async function fetchProductImages(
     }>(c, PRODUCT_IMAGES_QUERY, { ids });
     for (const n of data.nodes) {
       if (n?.featuredImage?.url) out.set(n.id, n.featuredImage.url);
+    }
+  }
+  return out;
+}
+
+const VARIANT_COSTS_QUERY = `
+query VariantCosts($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on ProductVariant {
+      id
+      inventoryItem { id unitCost { amount } }
+    }
+  }
+}`;
+
+export interface ShopifyVariantCost {
+  inventoryItemId: string | null;
+  unitCost: number;
+}
+
+/** Fetch Cost per item for the exact variants used by order lines. Product-level
+ * fallback can choose the wrong size/color; this mapping deliberately cannot. */
+export async function fetchVariantCosts(
+  creds: ShopifyCreds,
+  variantGids: string[]
+): Promise<Map<string, ShopifyVariantCost>> {
+  const out = new Map<string, ShopifyVariantCost>();
+  const uniqueIds = [...new Set(variantGids.filter(Boolean))];
+  if (uniqueIds.length === 0) return out;
+  const c = await resolveCreds(creds);
+  for (let i = 0; i < uniqueIds.length; i += 100) {
+    const ids = uniqueIds.slice(i, i + 100);
+    const data = await shopifyGraphQL<{
+      nodes: (
+        | {
+            id: string;
+            inventoryItem: {
+              id: string;
+              unitCost: { amount: string } | null;
+            } | null;
+          }
+        | null
+      )[];
+    }>(c, VARIANT_COSTS_QUERY, { ids });
+    for (const node of data.nodes) {
+      if (!node?.id) continue;
+      out.set(node.id, {
+        inventoryItemId: node.inventoryItem?.id ?? null,
+        unitCost: num(node.inventoryItem?.unitCost?.amount),
+      });
+    }
+  }
+  return out;
+}
+
+const ORDER_LINES_FOR_COST_QUERY = `
+query OrderLinesForCost($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Order {
+      id
+      lineItems(first: 250) {
+        nodes {
+          id
+          title
+          quantity
+          originalUnitPriceSet { shopMoney { amount } }
+          product { id }
+          variant { id inventoryItem { id unitCost { amount } } }
+        }
+      }
+    }
+  }
+}`;
+
+export interface ShopifyOrderCostLine {
+  externalLineItemId: string;
+  externalProductId: string | null;
+  externalVariantId: string | null;
+  inventoryItemId: string | null;
+  title: string;
+  quantity: number;
+  price: number;
+  unitCost: number;
+}
+
+/** Read only the order lines needed for a legacy missing-cost backfill. This
+ * avoids re-syncing the whole date range while still resolving the exact
+ * variant for rows created before variant IDs were stored locally. */
+export async function fetchOrderLinesForCosts(
+  creds: ShopifyCreds,
+  orderGids: string[]
+): Promise<Map<string, ShopifyOrderCostLine[]>> {
+  const out = new Map<string, ShopifyOrderCostLine[]>();
+  const uniqueIds = [...new Set(orderGids.filter(Boolean))];
+  if (uniqueIds.length === 0) return out;
+  const c = await resolveCreds(creds);
+  // 3 x 250 line items stays below Shopify's requested query-cost ceiling.
+  for (let i = 0; i < uniqueIds.length; i += 3) {
+    const ids = uniqueIds.slice(i, i + 3);
+    const data = await shopifyGraphQL<{
+      nodes: (
+        | {
+            id: string;
+            lineItems: {
+              nodes: {
+                id: string;
+                title: string;
+                quantity: number;
+                originalUnitPriceSet: { shopMoney: { amount: string } } | null;
+                product: { id: string } | null;
+                variant: {
+                  id: string;
+                  inventoryItem: {
+                    id: string;
+                    unitCost: { amount: string } | null;
+                  } | null;
+                } | null;
+              }[];
+            };
+          }
+        | null
+      )[];
+    }>(c, ORDER_LINES_FOR_COST_QUERY, { ids });
+    for (const order of data.nodes) {
+      if (!order?.id) continue;
+      out.set(
+        order.id,
+        order.lineItems.nodes.map((line) => ({
+          externalLineItemId: line.id,
+          externalProductId: line.product?.id ?? null,
+          externalVariantId: line.variant?.id ?? null,
+          inventoryItemId: line.variant?.inventoryItem?.id ?? null,
+          title: line.title,
+          quantity: line.quantity,
+          price: num(line.originalUnitPriceSet?.shopMoney.amount),
+          unitCost: num(line.variant?.inventoryItem?.unitCost?.amount),
+        }))
+      );
     }
   }
   return out;
@@ -716,10 +873,12 @@ interface WebhookOrderPayload {
   referring_site?: string | null;
   refunds?: { transactions?: { amount?: string; kind?: string }[] }[];
   line_items?: {
+    id?: number | string | null;
     title: string;
     quantity: number;
     price?: string;
     product_id?: number | string | null;
+    variant_id?: number | string | null;
   }[];
 }
 
@@ -735,6 +894,11 @@ export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm 
     return {
       externalProductId:
         li.product_id != null ? `gid://shopify/Product/${li.product_id}` : null,
+      externalLineItemId:
+        li.id != null ? `gid://shopify/LineItem/${li.id}` : null,
+      externalVariantId:
+        li.variant_id != null ? `gid://shopify/ProductVariant/${li.variant_id}` : null,
+      inventoryItemId: null,
       title: li.title,
       image: null, // webhook payload has no product image; a later sync fills it
       quantity: li.quantity,
@@ -797,6 +961,24 @@ export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm 
   };
 }
 
+export interface ShopifyInventoryCostWebhook {
+  inventoryItemId: string;
+  unitCost: number;
+}
+
+/** Normalize the REST inventory_items/update payload. A zero cost is valid but
+ * never used to overwrite an already captured historical snapshot. */
+export function normalizeInventoryCostWebhook(p: {
+  id?: number | string | null;
+  cost?: string | number | null;
+}): ShopifyInventoryCostWebhook | null {
+  if (p.id == null) return null;
+  return {
+    inventoryItemId: `gid://shopify/InventoryItem/${p.id}`,
+    unitCost: num(p.cost),
+  };
+}
+
 const WEBHOOK_CREATE = `
 mutation Create($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {
   webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {
@@ -812,7 +994,7 @@ export async function registerOrderWebhooks(
   callbackUrl: string
 ): Promise<{ created: number; errors: string[] }> {
   const c = await resolveCreds(creds);
-  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED"];
+  const topics = ["ORDERS_CREATE", "ORDERS_UPDATED", "INVENTORY_ITEMS_UPDATE"];
   let created = 0;
   const errors: string[] = [];
   for (const topic of topics) {

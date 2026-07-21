@@ -118,7 +118,8 @@ Chỉ số: Net margin, **MER** (DT/Ad spend), ROAS, AOV, LN/đơn, **Break-even
 
 ### Tự động đồng bộ thời gian thực (Webhook)
 
-Bấm **🔔 Tự động** ở mỗi store để đăng ký webhook `orders/create` + `orders/updated`. Sau đó
+Bấm **🔔 Tự động** ở mỗi store để đăng ký webhook `orders/create`, `orders/updated`
+và `inventory_items/update`. Sau đó
 **đơn mới / cập nhật từ Shopify sẽ tự đổ về** (không cần bấm Sync).
 
 - Endpoint nhận: `POST /api/shopify/webhook` (công khai, xác thực bằng **HMAC** chữ ký của Shopify
@@ -126,7 +127,7 @@ Bấm **🔔 Tự động** ở mỗi store để đăng ký webhook `orders/cre
 - Webhook dùng **cùng `externalId`** (GID) như sync thủ công → **không trùng/không ghi đè nhầm**.
   Đơn từ webhook tạm thời có thể thiếu phân loại kênh; lần Sync sau sẽ cập nhật đúng cùng dòng.
 - Cần app có **Client ID + Client Secret** (đã cài lên store). Trạng thái hiện badge **🔔 Tự động**.
-- ⚠️ Cần chạy `npx prisma db push` **một lần** (thêm cột `Store.webhooksEnabled`).
+- Vercel tự chạy `prisma db push` trước khi build để áp dụng các cột webhook/variant mới.
 
 > Đồng bộ là **idempotent** (upsert theo `storeId + externalId`) — chạy lại bao nhiêu lần
 > cũng không nhân đôi dữ liệu. Để tự động hằng ngày trên cloud, gọi `POST /api/shopify/sync`
