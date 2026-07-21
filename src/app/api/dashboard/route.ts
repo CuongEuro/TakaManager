@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { resolveRange, customRange, RangePreset, DEFAULT_TZ } from "@/lib/dates";
 import { computeDashboard } from "@/lib/pnl";
+import { findMissingBasecosts } from "@/lib/sync";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest) {
     isYMD(from) && isYMD(to)
       ? customRange(from, to, timezone)
       : resolveRange(preset, timezone);
-  const [data, storeOptions] = await Promise.all([
+  const [data, storeOptions, missingBasecost] = await Promise.all([
     computeDashboard({
       organizationId: session.oid,
       start: range.start,
@@ -39,6 +40,11 @@ export async function GET(req: NextRequest) {
       orderBy: { name: "asc" },
       select: { id: true, name: true },
     }),
+    findMissingBasecosts(session.oid, {
+      start: range.start,
+      end: range.end,
+      storeId,
+    }),
   ]);
 
   return NextResponse.json({
@@ -47,6 +53,7 @@ export async function GET(req: NextRequest) {
     range: { start: range.start, end: range.end, days: range.days },
     storeId: storeId ?? null,
     storeOptions,
+    missingBasecost,
     ...data,
   });
 }

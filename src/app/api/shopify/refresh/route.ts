@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/auth";
-import { syncStoreRefundsWindow, syncStoreCosts } from "@/lib/sync";
+import {
+  syncStoreRefundsWindow,
+  syncStoreCosts,
+  type MissingBasecostItem,
+} from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -56,11 +60,19 @@ export async function POST(req: NextRequest) {
   let refundsUpdated = 0;
   let costsUpdated = 0;
   const errors: string[] = [];
+  const missingProducts: MissingBasecostItem[] = [];
+  let missingCount = 0;
+  let missingTruncated = false;
   for (const r of results) {
     if (r.refunds.ok) refundsUpdated += r.refunds.updated;
     else errors.push(`${r.refunds.storeName}: ${r.refunds.error}`);
     if (r.costs) {
-      if (r.costs.ok) costsUpdated += r.costs.updated;
+      if (r.costs.ok) {
+        costsUpdated += r.costs.updated;
+        missingCount += r.costs.missingCount;
+        missingProducts.push(...r.costs.missingProducts);
+        missingTruncated ||= r.costs.missingTruncated;
+      }
       else errors.push(`${r.costs.storeName}: ${r.costs.error}`);
     }
   }
@@ -69,6 +81,9 @@ export async function POST(req: NextRequest) {
     stores: connected.length,
     refundsUpdated,
     costsUpdated,
+    missingCount,
+    missingProducts,
+    missingTruncated,
     errors,
   });
 }

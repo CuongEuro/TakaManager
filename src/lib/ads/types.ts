@@ -82,18 +82,24 @@ export interface AdAccountCreds {
 export function adSpendDedupeKey(parts: {
   source: string;
   accountId?: string | null; // distinguishes campaigns of same name across accounts
-  storeId: string | null;
   platform: string;
   date: string; // YYYY-MM-DD
+  campaignExternalId?: string | null;
   campaignName: string | null;
 }): string {
+  // v2 intentionally excludes storeId and campaignName when a provider ID is
+  // available. Store mappings and campaign names can change; neither should
+  // create a second spend row for the same provider campaign/day.
+  const campaignIdentity = parts.campaignExternalId
+    ? `id:${parts.campaignExternalId}`
+    : `name:${parts.campaignName ?? "_"}`;
   return [
+    "v2",
     parts.source,
     parts.accountId ?? "_",
-    parts.storeId ?? "_",
     parts.platform,
     parts.date,
-    parts.campaignName ?? "_",
+    encodeURIComponent(campaignIdentity),
   ].join("|");
 }
 

@@ -415,7 +415,82 @@ export interface CostSyncResult {
   products: number; // distinct products found in the window's orders
   withCost: number; // of those, how many have a Cost per item on Shopify
   updated: number; // line items patched
+  missingCount: number;
+  missingProducts: MissingBasecostItem[];
+  missingTruncated: boolean;
   error?: string;
+}
+
+export interface MissingBasecostItem {
+  productId: string | null;
+  externalId: string | null;
+  title: string;
+  storeId: string | null;
+  storeName: string;
+  orderLines: number;
+  units: number;
+}
+
+export interface MissingBasecostReport {
+  total: number;
+  items: MissingBasecostItem[];
+  truncated: boolean;
+}
+
+/** List products used by COST_PER_ITEM stores whose order-line cost is still
+ * zero. This is the actual P&L gap, so the warning remains visible even when a
+ * Shopify cost fetch completed successfully for other products. */
+export async function findMissingBasecosts(
+  organizationId: string,
+  opts: { start: Date; end: Date; storeId?: string; limit?: number }
+): Promise<MissingBasecostReport> {
+  const where = {
+    unitCost: { lte: 0 },
+    order: {
+      organizationId,
+      date: { gte: opts.start, lt: opts.end },
+      ...(opts.storeId ? { storeId: opts.storeId } : {}),
+      store: { cogsSource: "COST_PER_ITEM" },
+    },
+  };
+  const grouped = await prisma.orderLineItem.groupBy({
+    by: ["productId", "title"],
+    where,
+    _count: { _all: true },
+    _sum: { quantity: true },
+    orderBy: { _sum: { quantity: "desc" } },
+  });
+  const limit = opts.limit ?? 100;
+  const visible = grouped.slice(0, limit);
+  const productIds = visible
+    .map((row) => row.productId)
+    .filter((id): id is string => !!id);
+  const products = await prisma.product.findMany({
+    where: { organizationId, id: { in: productIds } },
+    select: {
+      id: true,
+      externalId: true,
+      store: { select: { id: true, name: true } },
+    },
+  });
+  const productById = new Map(products.map((p) => [p.id, p]));
+
+  return {
+    total: grouped.length,
+    truncated: grouped.length > visible.length,
+    items: visible.map((row) => {
+      const product = row.productId ? productById.get(row.productId) : null;
+      return {
+        productId: row.productId,
+        externalId: product?.externalId ?? null,
+        title: row.title,
+        storeId: product?.store.id ?? opts.storeId ?? null,
+        storeName: product?.store.name ?? "Không xác định",
+        orderLines: row._count._all,
+        units: row._sum.quantity ?? 0,
+      };
+    }),
+  };
 }
 
 /** Refresh "Cost per item" for a store: fetch each product's current cost from
@@ -444,6 +519,9 @@ export async function syncStoreCosts(
     products: 0,
     withCost: 0,
     updated: 0,
+    missingCount: 0,
+    missingProducts: [] as MissingBasecostItem[],
+    missingTruncated: false,
   };
   if (!creds)
     return { ...base, ok: false, error: "Thiếu Shopify domain hoặc khoá kết nối." };
@@ -477,7 +555,20 @@ export async function syncStoreCosts(
     const pids = grouped.map((g) => g.productId).filter((x): x is string => !!x);
     // No orders in the window → nothing to patch (the UI turns products:0
     // into a "sync orders first" hint).
-    if (pids.length === 0) return { ...base, ok: true };
+    if (pids.length === 0) {
+      const missing = await findMissingBasecosts(organizationId, {
+        start: winStart,
+        end: winEnd,
+        storeId,
+      });
+      return {
+        ...base,
+        ok: true,
+        missingCount: missing.total,
+        missingProducts: missing.items,
+        missingTruncated: missing.truncated,
+      };
+    }
 
     const products = await prisma.product.findMany({
       where: { id: { in: pids }, externalId: { not: null } },
@@ -498,25 +589,20 @@ export async function syncStoreCosts(
       });
       updated += res.count;
     }
-    // Products found but Shopify returned no cost for ANY of them → almost
-    // certainly "Cost per item" isn't filled in (or the token predates the
-    // read_inventory grant). Surface that instead of a silent "0 updated".
-    if (products.length > 0 && costMap.size === 0)
-      return {
-        ...base,
-        ok: false,
-        products: products.length,
-        error:
-          `Shopify không trả về Cost per item cho sản phẩm nào (${products.length} sản phẩm). ` +
-          "Kiểm tra: (1) đã nhập 'Cost per item' cho variant trong Shopify Admin, " +
-          "(2) app có scope read_inventory và đã cài lại lên store.",
-      };
+    const missing = await findMissingBasecosts(organizationId, {
+      start: winStart,
+      end: winEnd,
+      storeId,
+    });
     return {
       ...base,
       ok: true,
       products: products.length,
       withCost: costMap.size,
       updated,
+      missingCount: missing.total,
+      missingProducts: missing.items,
+      missingTruncated: missing.truncated,
     };
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
@@ -529,6 +615,50 @@ export async function syncStoreCosts(
       };
     return { ...base, ok: false, error: m };
   }
+}
+
+/** Best-effort targeted cost refresh for a newly created/updated webhook order.
+ * It avoids waiting for the hourly dashboard refresh or the daily cron. */
+export async function syncOrderCosts(
+  storeId: string,
+  organizationId: string,
+  orderExternalId: string
+): Promise<number> {
+  const { store, creds } = await storeCreds(storeId, organizationId);
+  if (!creds || store?.cogsSource !== "COST_PER_ITEM") return 0;
+
+  const order = await prisma.order.findFirst({
+    where: { storeId, organizationId, externalId: orderExternalId },
+    select: {
+      id: true,
+      lineItems: {
+        where: { productId: { not: null } },
+        select: {
+          productId: true,
+          product: { select: { externalId: true } },
+        },
+      },
+    },
+  });
+  if (!order) return 0;
+
+  const products = new Map<string, string>();
+  for (const line of order.lineItems) {
+    if (line.productId && line.product?.externalId)
+      products.set(line.productId, line.product.externalId);
+  }
+  const costs = await fetchProductCosts(creds, [...products.values()]);
+  let updated = 0;
+  for (const [productId, externalId] of products) {
+    const cost = costs.get(externalId);
+    if (!cost || cost <= 0) continue;
+    const result = await prisma.orderLineItem.updateMany({
+      where: { orderId: order.id, productId },
+      data: { unitCost: cost },
+    });
+    updated += result.count;
+  }
+  return updated;
 }
 
 // --- whole-window sync (cron / API) ----------------------------------------

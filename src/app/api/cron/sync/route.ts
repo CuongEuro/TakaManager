@@ -29,7 +29,12 @@ async function handle(req: NextRequest) {
   let storeOk = 0;
   let alerts = 0;
   for (const org of orgs) {
-    const adResults = await syncAllAdAccounts(org.id, { sinceDays: 7 });
+    // Completed days are stable. Refresh today's campaign totals only; deep
+    // hierarchy backfills remain an explicit operation in the Ads screen.
+    const adResults = await syncAllAdAccounts(org.id, {
+      sinceDays: 0,
+      deep: false,
+    });
     accounts += adResults.length;
     adOk += adResults.filter((r) => r.ok).length;
 

@@ -116,6 +116,20 @@ function fetchAdCreatives(
   }
 }
 
+/** Keep large-account DB writes bounded but no longer fully sequential. A small
+ * batch avoids exhausting the Prisma/Postgres connection pool. */
+async function mapConcurrent<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  concurrency = 5
+): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    out.push(...(await Promise.all(items.slice(i, i + concurrency).map(fn))));
+  }
+  return out;
+}
+
 /** Upsert campaign+adset entities and their daily metrics. Returns adset count.
  *  taxMultiplier: platform spend is pre-tax; store it tax-inclusive so the
  *  optimize tree's ROAS matches AdSpend / the P&L. */
@@ -147,7 +161,7 @@ async function syncHierarchy(
       });
   }
 
-  for (const [externalId, c] of campaigns) {
+  await mapConcurrent([...campaigns], async ([externalId, c]) => {
     await prisma.adEntity.upsert({
       where: { accountId_externalId: { accountId: account.id, externalId } },
       create: {
@@ -163,10 +177,9 @@ async function syncHierarchy(
       // Never touch storeId here — it holds the user's campaign→store mapping.
       update: { name: c.name, ...(c.status ? { status: c.status } : {}) },
     });
-  }
+  });
 
-  const adsetIdMap = new Map<string, string>(); // externalId -> AdEntity.id
-  for (const [externalId, a] of adsets) {
+  const savedAdsets = await mapConcurrent([...adsets], async ([externalId, a]) => {
     const e = await prisma.adEntity.upsert({
       where: { accountId_externalId: { accountId: account.id, externalId } },
       create: {
@@ -182,8 +195,9 @@ async function syncHierarchy(
       },
       update: { name: a.name, parentExternalId: a.parent, status: a.status },
     });
-    adsetIdMap.set(externalId, e.id);
-  }
+    return [externalId, e.id] as const;
+  });
+  const adsetIdMap = new Map(savedAdsets); // externalId -> AdEntity.id
 
   // 2) aggregate rows per (adset, date) then upsert metrics
   const byKey = new Map<string, AdsetInsight>();
@@ -201,9 +215,9 @@ async function syncHierarchy(
       byKey.set(key, { ...r });
     }
   }
-  for (const r of byKey.values()) {
+  await mapConcurrent([...byKey.values()], async (r) => {
     const entityId = adsetIdMap.get(r.adsetExternalId);
-    if (!entityId) continue;
+    if (!entityId) return;
     const date = new Date(`${r.date}T00:00:00Z`);
     const metric = {
       spend: r.spend * taxMultiplier,
@@ -224,7 +238,7 @@ async function syncHierarchy(
       create: { entityId, date, ...metric },
       update: metric,
     });
-  }
+  });
 
   // 3) AD (creative) tier — entities parented to their ad set + daily metrics.
   if (adRows.length > 0) {
@@ -240,8 +254,7 @@ async function syncHierarchy(
           status: r.status,
         });
 
-    const adIdMap = new Map<string, string>();
-    for (const [externalId, a] of ads) {
+    const savedAds = await mapConcurrent([...ads], async ([externalId, a]) => {
       const e = await prisma.adEntity.upsert({
         where: { accountId_externalId: { accountId: account.id, externalId } },
         create: {
@@ -257,8 +270,9 @@ async function syncHierarchy(
         },
         update: { name: a.name, parentExternalId: a.parent, status: a.status },
       });
-      adIdMap.set(externalId, e.id);
-    }
+      return [externalId, e.id] as const;
+    });
+    const adIdMap = new Map(savedAds);
 
     const adByKey = new Map<string, AdCreativeInsight>();
     for (const r of adRows) {
@@ -275,9 +289,9 @@ async function syncHierarchy(
         adByKey.set(key, { ...r });
       }
     }
-    for (const r of adByKey.values()) {
+    await mapConcurrent([...adByKey.values()], async (r) => {
       const entityId = adIdMap.get(r.adExternalId);
-      if (!entityId) continue;
+      if (!entityId) return;
       const date = new Date(`${r.date}T00:00:00Z`);
       const metric = {
         spend: r.spend * taxMultiplier,
@@ -298,7 +312,7 @@ async function syncHierarchy(
         create: { entityId, date, ...metric },
         update: metric,
       });
-    }
+    });
   }
 
   return adsets.size;
@@ -342,7 +356,7 @@ export async function syncAdAccount(
     sinceDays?: number;
     since?: string | Date; // explicit window start (chunked / custom range)
     until?: string | Date; // explicit window end (defaults to today)
-    deep?: boolean; // also pull ad set-level detail (heavy). Default true.
+    deep?: boolean; // also pull ad set-level detail (heavy). Default false.
     ads?: boolean; // also pull AD/creative-level detail (heaviest). Default true when deep.
   } = {}
 ): Promise<AdSyncResult> {
@@ -351,18 +365,18 @@ export async function syncAdAccount(
     throw new Error("Không tìm thấy tài khoản");
 
   // Window resolution. Explicit since/until (from chunked or custom-range sync)
-  // wins; else sinceDays (0 = today is valid → use != null); else incremental.
+  // wins; else sinceDays (0 = today is valid → use != null); else today only.
+  // Historical spend is stable and is deliberately not re-requested by the
+  // normal refresh path. Users can still select an older window to backfill.
   const until = opts.until != null ? parseDay(opts.until) : new Date();
   const since =
     opts.since != null
       ? parseDay(opts.since)
       : opts.sinceDays != null
       ? daysAgo(opts.sinceDays)
-      : a.lastSyncedAt
-      ? new Date(a.lastSyncedAt.getTime() - 2 * 86400000)
-      : daysAgo(7);
-  // Delete by Tokyo calendar-day boundaries. This also removes legacy daily
-  // rows written at a server-local midnight before UTC keys were standardized.
+      : daysAgo(0);
+  // Tokyo calendar-day boundaries are used only to find legacy rows that have
+  // a confirmed replacement in this run; absent provider rows are preserved.
   const window = customRange(isoDay(since), isoDay(until));
 
   try {
@@ -371,6 +385,13 @@ export async function syncAdAccount(
     // The SAME multiplier is applied to AdSpend and AdMetric so P&L and the
     // optimize tree agree (JP default 10%).
     const taxMultiplier = 1 + (a.taxRate ?? 0);
+    const knownCampaigns = await prisma.adEntity.findMany({
+      where: { accountId: a.id, level: "CAMPAIGN" },
+      select: { externalId: true, name: true },
+    });
+    const previousCampaignName = new Map(
+      knownCampaigns.map((c) => [c.externalId, c.name])
+    );
     // Campaign-level spend (light) — always pulled; retried on transient errors.
     const insights = await withRetry(() => fetchInsights(creds, since, until));
 
@@ -379,18 +400,15 @@ export async function syncAdAccount(
     // (the newest chunk); older backfill chunks skip it. Campaign entities still
     // get upserted from `insights` below, so attribution keeps working.
     let adsets = 0;
-    if (opts.deep !== false) {
+    if (opts.deep === true) {
       const adsetRows = await withRetry(() => fetchAdsets(creds, since, until));
-      // AD/creative tier is the heaviest — best-effort so a failure there never
-      // loses the ad set sync. Skip with ads:false. Default on when deep.
-      let adRows: AdCreativeInsight[] = [];
-      if (opts.ads !== false) {
-        try {
-          adRows = await withRetry(() => fetchAdCreatives(creds, since, until));
-        } catch {
-          adRows = [];
-        }
-      }
+      // AD/creative tier is the heaviest. A requested creative sync must report
+      // failure instead of silently claiming that a partial hierarchy is done.
+      // Skip it explicitly with ads:false. Default on when deep.
+      const adRows =
+        opts.ads !== false
+          ? await withRetry(() => fetchAdCreatives(creds, since, until))
+          : [];
       adsets = await syncHierarchy(
         {
           id: a.id,
@@ -419,7 +437,7 @@ export async function syncAdAccount(
           name: ins.campaignName,
           status: ins.campaignStatus,
         });
-    for (const [externalId, c] of insightCampaigns) {
+    await mapConcurrent([...insightCampaigns], async ([externalId, c]) => {
       await prisma.adEntity.upsert({
         where: { accountId_externalId: { accountId: a.id, externalId } },
         create: {
@@ -437,7 +455,7 @@ export async function syncAdAccount(
           ...(c.status ? { status: c.status } : {}),
         },
       });
-    }
+    });
 
     // Campaign → store mapping (campaign-level attribution). A spend row's store
     // is the campaign's mapped store, else the account's store (Google/Twitter =
@@ -472,9 +490,9 @@ export async function syncAdAccount(
       const key = adSpendDedupeKey({
         source: "API",
         accountId: a.id,
-        storeId,
         platform: a.platform,
         date: ins.date,
+        campaignExternalId: ins.campaignExternalId,
         campaignName: ins.campaignName,
       });
       const cur = agg.get(key);
@@ -498,16 +516,43 @@ export async function syncAdAccount(
       }
     }
 
-    // Rebuild this account's API rows for the window: delete then insert, so a
-    // changed campaign→store mapping never leaves stale rows under the old store.
-    await prisma.adSpend.deleteMany({
+    // Migrate only rows that the provider returned in THIS run from the legacy
+    // name/store-based key to the stable v2 provider-ID key. Crucially, rows for
+    // campaigns deleted on the ad platform are not returned and remain intact.
+    // This preserves historical spend instead of deleting the whole window.
+    const returnedDayNames = new Set<string>();
+    for (const ins of insights) {
+      returnedDayNames.add(`${ins.date}|${ins.campaignName ?? ""}`);
+      const previousName = ins.campaignExternalId
+        ? previousCampaignName.get(ins.campaignExternalId)
+        : null;
+      if (previousName) returnedDayNames.add(`${ins.date}|${previousName}`);
+    }
+    const currentKeys = new Set(agg.keys());
+    const existingRows = await prisma.adSpend.findMany({
       where: {
         accountId: a.id,
         source: "API",
         date: { gte: window.start, lt: window.end },
       },
+      select: { id: true, date: true, campaignName: true, dedupeKey: true },
     });
-    for (const [dedupeKey, row] of agg) {
+    const legacyIds = existingRows
+      .filter(
+        (r) =>
+          !!r.dedupeKey &&
+          !r.dedupeKey.startsWith("v2|") &&
+          !currentKeys.has(r.dedupeKey) &&
+          returnedDayNames.has(
+            `${isoDay(r.date)}|${r.campaignName ?? ""}`
+          )
+      )
+      .map((r) => r.id);
+    if (legacyIds.length > 0) {
+      await prisma.adSpend.deleteMany({ where: { id: { in: legacyIds } } });
+    }
+
+    await mapConcurrent([...agg], async ([dedupeKey, row]) => {
       const spend = row.spend * taxMultiplier;
       await prisma.adSpend.upsert({
         where: { dedupeKey },
@@ -530,6 +575,7 @@ export async function syncAdAccount(
           storeId: row.storeId,
           accountId: a.id,
           date: row.date,
+          campaignName: row.campaignName,
           spend,
           impressions: row.impressions,
           clicks: row.clicks,
@@ -537,12 +583,16 @@ export async function syncAdAccount(
           revenue: row.revenue,
         },
       });
-    }
-
-    await prisma.adAccount.update({
-      where: { id: accountId },
-      data: { lastSyncedAt: new Date() },
     });
+
+    // A historical backfill must not make the dashboard think today's refresh
+    // just ran. Stamp only windows that include the current provider day.
+    if (isoDay(until) >= isoDay(new Date())) {
+      await prisma.adAccount.update({
+        where: { id: accountId },
+        data: { lastSyncedAt: new Date() },
+      });
+    }
 
     return {
       accountId,
@@ -569,7 +619,7 @@ export async function syncAdAccount(
 
 export async function syncAllAdAccounts(
   organizationId: string,
-  opts: { sinceDays?: number } = {}
+  opts: { sinceDays?: number; deep?: boolean; ads?: boolean } = {}
 ): Promise<AdSyncResult[]> {
   const accounts = await prisma.adAccount.findMany({
     where: { organizationId, active: true },

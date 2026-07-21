@@ -26,6 +26,7 @@ import {
   customRange,
   DEFAULT_TZ,
 } from "@/lib/dates";
+import type { MissingBasecostItem } from "@/lib/sync";
 
 interface SyncTotals {
   ok: boolean;
@@ -38,6 +39,12 @@ interface SyncTotals {
 interface ProgressState {
   percent: number;
   message: string;
+}
+
+interface MissingCostsState {
+  total: number;
+  items: MissingBasecostItem[];
+  truncated: boolean;
 }
 
 interface PageResp {
@@ -460,6 +467,7 @@ export default function StoresPage() {
     null
   );
   const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [missingCosts, setMissingCosts] = useState<MissingCostsState | null>(null);
   // Khoảng ngày kéo dữ liệu — chọn qua bộ chọn ngày (preset + lịch).
   const [range, setRange] = useState<DateRange>(() => {
     const today = calendarDateInTimeZone();
@@ -700,12 +708,16 @@ export default function StoresPage() {
     }
     setBusy("COSTS");
     setMsg(null);
+    setMissingCosts(null);
     setProgress({ percent: 1, message: "Cập nhật giá vốn…" });
     try {
       const { from, to } = range;
       let updated = 0;
       let products = 0;
       let withCost = 0;
+      let missingCount = 0;
+      let missingTruncated = false;
+      const missingProducts: MissingBasecostItem[] = [];
       const errors: string[] = [];
       const n = targets.length;
       for (let i = 0; i < n; i++) {
@@ -727,15 +739,34 @@ export default function StoresPage() {
           }).then(safeJson);
           products += Number(r.products) || 0;
           withCost += Number(r.withCost) || 0;
-          if (r.ok) updated += Number(r.updated) || 0;
+          if (r.ok) {
+            updated += Number(r.updated) || 0;
+            missingCount += Number(r.missingCount) || 0;
+            if (Array.isArray(r.missingProducts))
+              missingProducts.push(...(r.missingProducts as MissingBasecostItem[]));
+            missingTruncated ||= Boolean(r.missingTruncated);
+          }
           else errors.push(`${s.name}: ${r.error}`);
         } catch (e) {
           errors.push(`${s.name}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
+      if (missingCount > 0) {
+        setMissingCosts({
+          total: missingCount,
+          items: missingProducts,
+          truncated: missingTruncated,
+        });
+      }
       setProgress({ percent: 100, message: "Hoàn tất" });
       if (errors.length > 0) {
         setMsg({ id: "ALL", ok: false, text: `⚠️ ${errors.join(" · ")}` });
+      } else if (missingCount > 0) {
+        setMsg({
+          id: "ALL",
+          ok: false,
+          text: `⚠ Đã cập nhật ${updated} dòng giá vốn; còn ${missingCount} sản phẩm chưa có Cost per item. Xem danh sách bên dưới.`,
+        });
       } else if (products === 0) {
         setMsg({
           id: "ALL",
@@ -864,6 +895,39 @@ export default function StoresPage() {
           }`}
         >
           {msg.text}
+        </div>
+      )}
+
+      {missingCosts && missingCosts.total > 0 && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          <div className="font-semibold">
+            ⚠ {missingCosts.total} sản phẩm chưa có Cost per item
+          </div>
+          <div className="mt-1 text-xs text-amber-700">
+            Nhập Basecost cho các sản phẩm dưới đây trong Shopify Admin, sau đó
+            bấm Cập nhật giá vốn lại.
+          </div>
+          <div className="mt-3 max-h-60 overflow-auto rounded-lg border border-amber-200 bg-white/70">
+            {missingCosts.items.map((item, index) => (
+              <div
+                key={`${item.storeId ?? "_"}|${item.productId ?? item.title}|${index}`}
+                className="flex items-center justify-between gap-3 border-b border-amber-100 px-3 py-2 last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-slate-800">{item.title}</div>
+                  <div className="text-xs text-slate-500">{item.storeName}</div>
+                </div>
+                <div className="shrink-0 text-right text-xs text-amber-800">
+                  {item.units} item · {item.orderLines} dòng order
+                </div>
+              </div>
+            ))}
+          </div>
+          {missingCosts.truncated && (
+            <div className="mt-2 text-xs text-amber-700">
+              Danh sách đang hiển thị 100 sản phẩm đầu tiên mỗi store.
+            </div>
+          )}
         </div>
       )}
 

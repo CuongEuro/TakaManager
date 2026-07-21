@@ -163,13 +163,13 @@ export default function AdAccountsPage() {
   // Sync window — chosen via the date-range picker (presets + calendar).
   const [range, setRange] = useState<DateRange>(() => {
     const today = calendarDateInTimeZone();
-    return { from: addCalendarDays(today, -6), to: today };
+    return { from: today, to: today };
   });
   // Bulk-sync progress + per-account results (browser-driven, one account at a time).
   const [syncProg, setSyncProg] = useState<{ done: number; total: number } | null>(null);
   const [syncResults, setSyncResults] = useState<SyncResult[]>([]);
-  // Deep (adset-level) sync for EVERY chunk, not just the newest — needed to
-  // backfill the optimize tree's history (e.g. after the tax-consistency fix).
+  // Deep hierarchy is explicit because accounts with many adsets/ads are too
+  // large for the normal, frequent campaign-spend refresh.
   const [deepAll, setDeepAll] = useState(false);
 
   // Campaign → store mapping panel state
@@ -328,7 +328,7 @@ export default function AdAccountsPage() {
             accountId,
             since: calendarYMD(since),
             until: calendarYMD(until),
-            deep, // ad set-level detail only for the newest chunk (heavy)
+            deep,
           }),
         }).then((x) => x.json());
         const res: SyncResult | undefined = r.results?.[0];
@@ -349,8 +349,8 @@ export default function AdAccountsPage() {
 
   // Sync one account over [from,to] by chunking. Failed chunks auto-retry; if a
   // chunk still fails it is reported but other chunks proceed (no data loss for
-  // the parts that succeeded — each chunk is idempotent server-side). Only the
-  // newest chunk pulls the heavy ad set-level detail.
+  // the parts that succeeded — each chunk is idempotent server-side). Deep mode
+  // uses one day/request so a large hierarchy can resume safely.
   async function syncAccountRange(
     a: AdAccount,
     from: Date,
@@ -360,7 +360,7 @@ export default function AdAccountsPage() {
     let rows = 0;
     let ok = true;
     let error: string | undefined;
-    const chunks = buildChunks(from, to);
+    const chunks = buildChunks(from, to, deepAll ? 1 : 14);
     for (let i = 0; i < chunks.length; i++) {
       const c = chunks[i];
       try {
@@ -368,7 +368,7 @@ export default function AdAccountsPage() {
           a.id,
           c.since,
           c.until,
-          deepAll || i === chunks.length - 1
+          deepAll
         );
         rows += res.rows;
       } catch (e) {
@@ -395,7 +395,7 @@ export default function AdAccountsPage() {
     setBusy(a.id + "sync");
     setMsg(null);
     setSyncResults([]);
-    const total = buildChunks(range.from, range.to).length;
+    const total = buildChunks(range.from, range.to, deepAll ? 1 : 14).length;
     let done = 0;
     setSyncProg({ done: 0, total });
     const res = await syncAccountRange(a, range.from, range.to, () => {
@@ -426,7 +426,7 @@ export default function AdAccountsPage() {
     setBusy("ALL");
     setMsg(null);
     setSyncResults([]);
-    const chunksPer = buildChunks(range.from, range.to).length;
+    const chunksPer = buildChunks(range.from, range.to, deepAll ? 1 : 14).length;
     const total = targets.length * chunksPer;
     let done = 0;
     setSyncProg({ done: 0, total });
@@ -465,7 +465,7 @@ export default function AdAccountsPage() {
             </div>
             <label
               className="flex items-center gap-1.5 text-xs text-slate-600"
-              title="Kéo chi tiết adset cho MỌI khoảng ngày (chậm hơn) — dùng khi cần backfill dữ liệu Tối ưu Ads"
+              title="Kéo Campaign → adset → quảng cáo theo từng ngày. Chỉ bật khi cần backfill dữ liệu Tối ưu Ads."
             >
               <input
                 type="checkbox"
@@ -474,7 +474,7 @@ export default function AdAccountsPage() {
                 disabled={!!busy}
                 className="h-3.5 w-3.5 accent-brand-600"
               />
-              Đồng bộ sâu (adset) toàn bộ khoảng
+              Đồng bộ sâu (adset + quảng cáo)
             </label>
             <Button onClick={syncAll} disabled={!!busy}>
               {busy === "ALL" && syncProg

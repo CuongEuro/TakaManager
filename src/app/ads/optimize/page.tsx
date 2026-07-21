@@ -5,7 +5,12 @@ import type { AdTree, CampaignNode, AdsetNode, AdNode, Trend } from "@/lib/adins
 import type { OptimizeResult, Reco, Action } from "@/lib/optimize";
 import type { AiStrategy } from "@/lib/ai";
 import { ACTION_LABELS } from "@/lib/optimize";
-import { RANGE_PRESET_LABELS, RangePreset } from "@/lib/dates";
+import {
+  RANGE_PRESET_LABELS,
+  RangePreset,
+  calendarDateInTimeZone,
+  calendarYMD,
+} from "@/lib/dates";
 import { AD_PLATFORM_LABELS } from "@/lib/constants";
 import {
   formatJPY,
@@ -218,7 +223,7 @@ export default function OptimizePage() {
     setPage(1);
   }, [actionFilter, statusFilter, preset, storeId, platform, reloadTick]);
 
-  // Sync the latest ad data (campaign spend + STATUS, over the visible window)
+  // Sync today's ad data (campaign spend + status)
   // for every active/configured account, then reload the tree. Light sync
   // (deep=false) — fast and reliable; use "Đồng bộ sâu" on Kết nối Ads for
   // adset-level backfill.
@@ -236,15 +241,19 @@ export default function OptimizePage() {
         setSyncMsg("Chưa có tài khoản Ads nào được cấu hình.");
         return;
       }
-      const since = data?.range.start;
-      const until = data?.range.end;
+      const today = calendarYMD(calendarDateInTimeZone());
       let ok = 0;
       for (const a of targets) {
         try {
           const r = await fetch("/api/ads/sync", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ accountId: a.id, since, until, deep: false }),
+            body: JSON.stringify({
+              accountId: a.id,
+              since: today,
+              until: today,
+              deep: false,
+            }),
           }).then((x) => x.json());
           if (r.results?.[0]?.ok) ok++;
         } catch {

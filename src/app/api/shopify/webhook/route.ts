@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { verifyWebhookHmac, normalizeWebhookOrder } from "@/lib/shopify";
-import { ingestOrders } from "@/lib/sync";
+import { ingestOrders, syncOrderCosts } from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +36,15 @@ export async function POST(req: NextRequest) {
       const payload = JSON.parse(raw);
       const norm = normalizeWebhookOrder(payload);
       await ingestOrders(store.id, store.organizationId, [norm]);
+      // Webhook payloads do not contain inventory unitCost. Fill it immediately
+      // for COST_PER_ITEM stores so new/updated orders do not wait for a manual
+      // refresh. Missing Shopify costs remain zero and appear in the dashboard
+      // warning list.
+      try {
+        await syncOrderCosts(store.id, store.organizationId, norm.externalId);
+      } catch (costError) {
+        console.error("Shopify webhook cost refresh error:", costError);
+      }
     } catch (e) {
       // Return 200 anyway so Shopify doesn't enter an aggressive retry loop;
       // the error is logged for inspection.

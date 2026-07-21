@@ -8,7 +8,7 @@ export const maxDuration = 60;
 
 // Lightweight, THROTTLED refresh of recent ad spend so the dashboard's "today"
 // reflects near-real-time spend (orders/revenue are already realtime via
-// webhooks). Pulls only today+yesterday, campaign-level (deep=false), and skips
+// webhooks). Pulls only today, campaign-level (deep=false), and skips
 // accounts synced within `staleMinutes` so repeated dashboard loads don't hammer
 // the ad APIs.
 function configured(a: {
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
       skipped++;
       continue;
     }
-    const res = await syncAdAccount(a.id, session.oid, { sinceDays: 1, deep: false });
+    const res = await syncAdAccount(a.id, session.oid, { sinceDays: 0, deep: false });
     refreshed++;
     if (res.ok) ok++;
   }

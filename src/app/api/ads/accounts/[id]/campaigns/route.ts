@@ -67,7 +67,10 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
   // Keep the window light (30d) to avoid pulling heavy old campaign history.
   let resync: { ok: boolean; error?: string } = { ok: true };
   try {
-    const r = await syncAdAccount(id, session.oid, { sinceDays: 30 });
+    const r = await syncAdAccount(id, session.oid, {
+      sinceDays: 30,
+      deep: false,
+    });
     resync = { ok: r.ok, error: r.error };
   } catch (e) {
     resync = { ok: false, error: e instanceof Error ? e.message : String(e) };

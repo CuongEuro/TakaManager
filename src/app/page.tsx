@@ -21,10 +21,16 @@ import { Card, StatCard, PageHeader, Select, EmptyState, Badge } from "@/compone
 import { DashboardChart } from "@/components/DashboardChart";
 import { ChannelEfficiencyTrendChart } from "@/components/ChannelEfficiencyTrendChart";
 import { calendarDateInTimeZone, calendarYMD, DEFAULT_TZ } from "@/lib/dates";
+import type { MissingBasecostItem } from "@/lib/sync";
 
 interface DashboardResponse extends DashboardData {
   storeId: string | null;
   storeOptions: { id: string; name: string }[];
+  missingBasecost: {
+    total: number;
+    items: MissingBasecostItem[];
+    truncated: boolean;
+  };
 }
 
 // Human labels for the COGS-source breakdown (PnlResult.variableA.cogsBy).
@@ -158,11 +164,14 @@ export default function DashboardPage() {
         }
         if (force) {
           const errors = Array.isArray(r.errors) ? (r.errors as string[]) : [];
+          const missingCount = Number(r.missingCount) || 0;
           setRefreshMsg(
             r.error
               ? `⚠ Cập nhật Basecost lỗi: ${r.error}`
               : errors.length > 0
               ? `⚠ ${errors.join(" · ")}`
+              : missingCount > 0
+              ? `⚠ Đã cập nhật Basecost, còn ${missingCount} sản phẩm chưa có Cost per item.`
               : `✓ Đã cập nhật ${r.costsUpdated ?? 0} dòng giá vốn, ${
                   r.refundsUpdated ?? 0
                 } hoàn tiền (${r.stores ?? 0} store).`
@@ -245,6 +254,49 @@ export default function DashboardPage() {
           }`}
         >
           {refreshMsg}
+        </div>
+      )}
+
+      {data?.missingBasecost && data.missingBasecost.total > 0 && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="font-semibold">
+                ⚠ {data.missingBasecost.total} sản phẩm chưa có Basecost
+              </div>
+              <div className="mt-0.5 text-xs text-amber-700">
+                Các order trong khoảng đang xem chưa được tính đủ COGS. Hãy nhập
+                Cost per item trong Shopify rồi bấm Cập nhật Basecost.
+              </div>
+            </div>
+            <Link
+              href="/stores"
+              className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+            >
+              Mở quản lý Store
+            </Link>
+          </div>
+          <div className="mt-3 max-h-60 overflow-auto rounded-lg border border-amber-200 bg-white/70">
+            {data.missingBasecost.items.map((item, index) => (
+              <div
+                key={`${item.storeId ?? "_"}|${item.productId ?? item.title}|${index}`}
+                className="flex items-center justify-between gap-3 border-b border-amber-100 px-3 py-2 last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-slate-800">{item.title}</div>
+                  <div className="text-xs text-slate-500">{item.storeName}</div>
+                </div>
+                <div className="shrink-0 text-right text-xs text-amber-800">
+                  {item.units} item · {item.orderLines} dòng order
+                </div>
+              </div>
+            ))}
+          </div>
+          {data.missingBasecost.truncated && (
+            <div className="mt-2 text-xs text-amber-700">
+              Danh sách đang hiển thị 100 sản phẩm đầu tiên.
+            </div>
+          )}
         </div>
       )}
 
