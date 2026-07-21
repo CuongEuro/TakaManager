@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   fetchProductCosts,
   fetchOrderLinesForCosts,
+  fetchOrdersPage,
   fetchVariantCosts,
   firstPositiveUnitCost,
   normalizeInventoryCostWebhook,
@@ -118,6 +119,41 @@ test("reads historical SKU and variant title for cost recovery", { concurrency: 
     );
     assert.equal(orders.get(orderId)?.[0].sku, "CAT-S-W");
     assert.equal(orders.get(orderId)?.[0].variantTitle, "Cotton / S / White");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("manual order sync uses a bounded page without inventory cost", { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { query: string };
+    assert.match(body.query, /orders\(first: 10/);
+    assert.doesNotMatch(body.query, /unitCost/);
+    return new Response(
+      JSON.stringify({
+        data: {
+          orders: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [],
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const page = await fetchOrdersPage(
+      { shopifyDomain: "example.myshopify.com", shopifyToken: "test-token" },
+      new Date("2026-07-01T00:00:00Z"),
+      null,
+      false,
+      new Date("2026-08-01T00:00:00Z"),
+      false
+    );
+    assert.equal(page.orders.length, 0);
+    assert.equal(page.hasNext, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

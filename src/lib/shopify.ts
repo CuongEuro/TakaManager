@@ -130,10 +130,10 @@ const RETRYABLE = new Set([429, 500, 502, 503, 504, 520, 522, 524]);
 export async function shopifyGraphQL<T>(
   creds: ShopifyCreds,
   query: string,
-  variables: Record<string, unknown> = {}
+  variables: Record<string, unknown> = {},
+  maxAttempts = 4
 ): Promise<T> {
   const url = endpoint(creds);
-  const maxAttempts = 4;
   let lastErr = "";
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -211,7 +211,7 @@ function ordersQuery(journey: boolean, cost: boolean): string {
     : `variant { id }`;
   return `
 query Orders($cursor: String, $query: String) {
-  orders(first: 25, after: $cursor, query: $query, sortKey: CREATED_AT) {
+  orders(first: 10, after: $cursor, query: $query, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -903,10 +903,12 @@ export async function fetchOrdersPage(
 
   let data: OrdersResp;
   try {
-    data = await shopifyGraphQL<OrdersResp>(c, ordersQuery(used, includeCost), {
-      cursor,
-      query: queryStr,
-    });
+    data = await shopifyGraphQL<OrdersResp>(
+      c,
+      ordersQuery(used, includeCost),
+      { cursor, query: queryStr },
+      used ? 1 : 2
+    );
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
     // A missing read_inventory scope (cost per item) is a config error → surface
@@ -924,10 +926,12 @@ export async function fetchOrdersPage(
     const gateway = /HTTP (429|5\d\d)|throttl/i.test(m);
     if (used && (accessDenied || gateway)) {
       used = false;
-      data = await shopifyGraphQL<OrdersResp>(c, ordersQuery(false, includeCost), {
-        cursor,
-        query: queryStr,
-      });
+      data = await shopifyGraphQL<OrdersResp>(
+        c,
+        ordersQuery(false, includeCost),
+        { cursor, query: queryStr },
+        2
+      );
     } else {
       throw e;
     }

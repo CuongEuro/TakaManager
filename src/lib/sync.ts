@@ -12,7 +12,6 @@
 import { prisma } from "@/lib/prisma";
 import {
   fetchOrdersPage,
-  fetchOrdersCount,
   fetchOrdersSince,
   fetchProductImages,
   fetchRefundsPage,
@@ -379,8 +378,9 @@ export async function syncStorePage(
   const since = resolveSince(opts, store!.lastSyncedAt);
   const until = opts.until;
   try {
-    // On the first page (no cursor) also ask Shopify the total for an accurate bar.
-    const total = opts.cursor ? null : await fetchOrdersCount(creds, since, until);
+    // Avoid a separate ordersCount API call: the browser can show page-based
+    // progress, and one less Shopify request keeps this serverless call short.
+    const total = null;
 
     const page = await fetchOrdersPage(
       creds,
@@ -388,20 +388,18 @@ export async function syncStorePage(
       opts.cursor ?? null,
       opts.useJourney ?? true,
       until,
-      store!.cogsSource === "COST_PER_ITEM" // pull Cost per item only if this store uses it
+      false // Basecost uses its own missing-only, resumable update flow
     );
     const productMap = await upsertProductsFromOrders(page.orders, storeId, organizationId);
     await upsertOrders(page.orders, storeId, organizationId, productMap);
 
-    // On the last page, mark synced and backfill missing images — but only when
-    // finalizing (the newest chunk), so a long chunked backfill doesn't repeat
-    // the image backfill for every chunk.
+    // Keep the last page lightweight: stamp completion only. Images for these
+    // products were already included in the order query.
     if (!page.hasNext && opts.finalize !== false) {
       await prisma.store.update({
         where: { id: storeId },
         data: { lastSyncedAt: new Date() },
       });
-      await backfillStoreImages(storeId, organizationId, creds);
     }
 
     return {
