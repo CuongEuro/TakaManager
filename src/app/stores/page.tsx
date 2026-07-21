@@ -727,26 +727,42 @@ export default function StoresPage() {
           message: `[${i + 1}/${n}] ${s.name}: đang lấy giá vốn…`,
         });
         try {
-          const r = await fetch("/api/shopify/costs", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              storeId: s.id,
-              // Calendar days — the server maps them to Asia/Tokyo.
-              from: calendarYMD(from),
-              to: calendarYMD(to),
-            }),
-          }).then(safeJson);
-          products += Number(r.products) || 0;
-          withCost += Number(r.withCost) || 0;
-          if (r.ok) {
+          let cursor: string | null = null;
+          for (let page = 0; page < 500; page++) {
+            setProgress({
+              percent: Math.round((i * 100) / n),
+              message: `[${i + 1}/${n}] ${s.name}: đợt ${page + 1}…`,
+            });
+            const r: Record<string, unknown> = await fetch("/api/shopify/costs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                storeId: s.id,
+                // Calendar days — the server maps them to Asia/Tokyo.
+                from: calendarYMD(from),
+                to: calendarYMD(to),
+                cursor,
+                limit: 10,
+              }),
+            }).then(safeJson);
+            products += Number(r.products) || 0;
+            withCost += Number(r.withCost) || 0;
+            if (!r.ok) {
+              errors.push(`${s.name}: ${r.error}`);
+              break;
+            }
             updated += Number(r.updated) || 0;
             missingCount += Number(r.missingCount) || 0;
             if (Array.isArray(r.missingProducts))
               missingProducts.push(...(r.missingProducts as MissingBasecostItem[]));
             missingTruncated ||= Boolean(r.missingTruncated);
+            if (!r.hasNext) break;
+            if (typeof r.nextCursor !== "string" || !r.nextCursor) {
+              errors.push(`${s.name}: Shopify không trả về cursor batch kế tiếp.`);
+              break;
+            }
+            cursor = r.nextCursor;
           }
-          else errors.push(`${s.name}: ${r.error}`);
         } catch (e) {
           errors.push(`${s.name}: ${e instanceof Error ? e.message : String(e)}`);
         }

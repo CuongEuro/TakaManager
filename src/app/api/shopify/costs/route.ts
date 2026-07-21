@@ -26,6 +26,8 @@ export async function POST(req: NextRequest) {
     sinceDays: b.sinceDays ? Number(b.sinceDays) : undefined,
     since: b.since ? new Date(String(b.since)) : undefined,
     until: b.until ? new Date(String(b.until)) : undefined,
+    cursor: typeof b.cursor === "string" ? b.cursor : undefined,
+    limit: b.limit ? Number(b.limit) : undefined,
   });
 
   return NextResponse.json(result);

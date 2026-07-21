@@ -2,16 +2,125 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   fetchProductCosts,
+  fetchOrderLinesForCosts,
   fetchVariantCosts,
   firstPositiveUnitCost,
   normalizeInventoryCostWebhook,
   normalizeWebhookOrder,
   preserveUnitCostSnapshot,
+  resolveCatalogVariantCost,
 } from "./shopify";
 
 test("preserves a positive historical cost during later order syncs", () => {
   assert.equal(preserveUnitCostSnapshot(640, 725), 640);
   assert.equal(preserveUnitCostSnapshot(0, 725), 725);
+});
+
+test("resolves a recreated variant by SKU or exact historical title", () => {
+  const catalog = {
+    externalProductId: "gid://shopify/Product/202",
+    title: "Cat shirt",
+    variants: [
+      {
+        externalVariantId: "gid://shopify/ProductVariant/1",
+        inventoryItemId: "gid://shopify/InventoryItem/1",
+        title: "Cotton / S / White",
+        sku: "CAT-S-W",
+        unitCost: 436,
+      },
+      {
+        externalVariantId: "gid://shopify/ProductVariant/2",
+        inventoryItemId: "gid://shopify/InventoryItem/2",
+        title: "Cotton / S / Gray",
+        sku: "CAT-S-G",
+        unitCost: 462,
+      },
+    ],
+  };
+
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: "CAT-S-G", variantTitle: "old title" },
+      catalog
+    )?.unitCost,
+    462
+  );
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "  Cotton / S / White  " },
+      catalog
+    )?.unitCost,
+    436
+  );
+});
+
+test("does not guess a cost when historical variant cannot be identified", () => {
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "Cotton / XL / Pink" },
+      {
+        externalProductId: "gid://shopify/Product/202",
+        title: "Cat shirt",
+        variants: [
+          {
+            externalVariantId: "gid://shopify/ProductVariant/1",
+            inventoryItemId: "gid://shopify/InventoryItem/1",
+            title: "Cotton / S / White",
+            sku: null,
+            unitCost: 436,
+          },
+        ],
+      }
+    ),
+    null
+  );
+});
+
+test("reads historical SKU and variant title for cost recovery", { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const orderId = "gid://shopify/Order/99";
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { query: string };
+    assert.match(body.query, /variantTitle/);
+    assert.match(body.query, /\bsku\b/);
+    return new Response(
+      JSON.stringify({
+        data: {
+          nodes: [
+            {
+              id: orderId,
+              lineItems: {
+                nodes: [
+                  {
+                    id: "gid://shopify/LineItem/101",
+                    title: "Cat shirt",
+                    variantTitle: "Cotton / S / White",
+                    sku: "CAT-S-W",
+                    quantity: 1,
+                    originalUnitPriceSet: { shopMoney: { amount: "4180" } },
+                    product: { id: "gid://shopify/Product/202" },
+                    variant: null,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const orders = await fetchOrderLinesForCosts(
+      { shopifyDomain: "example.myshopify.com", shopifyToken: "test-token" },
+      [orderId]
+    );
+    assert.equal(orders.get(orderId)?.[0].sku, "CAT-S-W");
+    assert.equal(orders.get(orderId)?.[0].variantTitle, "Cotton / S / White");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("order webhook keeps exact Shopify line and variant IDs", () => {

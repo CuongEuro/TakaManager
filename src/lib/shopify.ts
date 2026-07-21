@@ -464,6 +464,8 @@ query OrderLinesForCost($ids: [ID!]!) {
         nodes {
           id
           title
+          variantTitle
+          sku
           quantity
           originalUnitPriceSet { shopMoney { amount } }
           product { id }
@@ -480,6 +482,8 @@ export interface ShopifyOrderCostLine {
   externalVariantId: string | null;
   inventoryItemId: string | null;
   title: string;
+  variantTitle: string | null;
+  sku: string | null;
   quantity: number;
   price: number;
   unitCost: number;
@@ -507,6 +511,8 @@ export async function fetchOrderLinesForCosts(
               nodes: {
                 id: string;
                 title: string;
+                variantTitle: string | null;
+                sku: string | null;
                 quantity: number;
                 originalUnitPriceSet: { shopMoney: { amount: string } } | null;
                 product: { id: string } | null;
@@ -533,6 +539,8 @@ export async function fetchOrderLinesForCosts(
           externalVariantId: line.variant?.id ?? null,
           inventoryItemId: line.variant?.inventoryItem?.id ?? null,
           title: line.title,
+          variantTitle: line.variantTitle,
+          sku: line.sku,
           quantity: line.quantity,
           price: num(line.originalUnitPriceSet?.shopMoney.amount),
           unitCost: num(line.variant?.inventoryItem?.unitCost?.amount),
@@ -541,6 +549,185 @@ export async function fetchOrderLinesForCosts(
     }
   }
   return out;
+}
+
+const PRODUCT_VARIANT_CATALOG_QUERY = `
+query ProductVariantCatalog($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product {
+      id
+      title
+      variants(first: 250) {
+        nodes { id title sku inventoryItem { id unitCost { amount } } }
+      }
+    }
+  }
+}`;
+
+const PRODUCT_VARIANT_CATALOG_BY_TITLE_QUERY = `
+query ProductVariantCatalogByTitle($query: String!) {
+  products(first: 3, query: $query) {
+    nodes {
+      id
+      title
+      variants(first: 250) {
+        nodes { id title sku inventoryItem { id unitCost { amount } } }
+      }
+    }
+  }
+}`;
+
+export interface ShopifyCatalogVariant extends ShopifyVariantCost {
+  externalVariantId: string;
+  title: string;
+  sku: string | null;
+}
+
+export interface ShopifyProductVariantCatalog {
+  externalProductId: string;
+  title: string;
+  variants: ShopifyCatalogVariant[];
+}
+
+function normalizedLookup(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function titleCatalogKey(title: string): string {
+  return `title:${normalizedLookup(title)}`;
+}
+
+function idCatalogKey(id: string): string {
+  return `id:${id}`;
+}
+
+type ProductVariantCatalogNode = {
+  id: string;
+  title: string;
+  variants: {
+    nodes: {
+      id: string;
+      title: string;
+      sku: string | null;
+      inventoryItem: {
+        id: string;
+        unitCost: { amount: string } | null;
+      } | null;
+    }[];
+  };
+};
+
+function normalizeCatalog(node: ProductVariantCatalogNode): ShopifyProductVariantCatalog {
+  return {
+    externalProductId: node.id,
+    title: node.title,
+    variants: node.variants.nodes.map((variant) => ({
+      externalVariantId: variant.id,
+      title: variant.title,
+      sku: variant.sku,
+      inventoryItemId: variant.inventoryItem?.id ?? null,
+      unitCost: num(variant.inventoryItem?.unitCost?.amount),
+    })),
+  };
+}
+
+/** Load current variants for unresolved historical lines. Product GID is used
+ * first; exact title search is only a fallback for a deleted/recreated product. */
+export async function fetchProductVariantCatalogs(
+  creds: ShopifyCreds,
+  products: { externalProductId: string | null; title: string }[]
+): Promise<Map<string, ShopifyProductVariantCatalog>> {
+  const out = new Map<string, ShopifyProductVariantCatalog>();
+  if (products.length === 0) return out;
+  const c = await resolveCreds(creds);
+  const ids = [
+    ...new Set(
+      products
+        .map((product) => product.externalProductId)
+        .filter((id): id is string => !!id)
+    ),
+  ];
+  for (let i = 0; i < ids.length; i += 3) {
+    const data = await shopifyGraphQL<{
+      nodes: (ProductVariantCatalogNode | null)[];
+    }>(c, PRODUCT_VARIANT_CATALOG_QUERY, { ids: ids.slice(i, i + 3) });
+    for (const node of data.nodes) {
+      if (!node) continue;
+      const catalog = normalizeCatalog(node);
+      out.set(idCatalogKey(catalog.externalProductId), catalog);
+      out.set(titleCatalogKey(catalog.title), catalog);
+    }
+  }
+
+  const missingTitles = [
+    ...new Set(
+      products
+        .filter(
+          (product) =>
+            !product.externalProductId ||
+            !out.has(idCatalogKey(product.externalProductId))
+        )
+        .map((product) => product.title.trim())
+        .filter(Boolean)
+    ),
+  ];
+  for (let i = 0; i < missingTitles.length; i += 2) {
+    const group = missingTitles.slice(i, i + 2);
+    const results = await Promise.all(
+      group.map(async (title) => {
+        const escaped = title.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const data = await shopifyGraphQL<{
+          products: { nodes: ProductVariantCatalogNode[] };
+        }>(c, PRODUCT_VARIANT_CATALOG_BY_TITLE_QUERY, {
+          query: `title:'${escaped}'`,
+        });
+        const exact = data.products.nodes.filter(
+          (node) => normalizedLookup(node.title) === normalizedLookup(title)
+        );
+        return exact.length === 1 ? normalizeCatalog(exact[0]) : null;
+      })
+    );
+    for (const catalog of results) {
+      if (!catalog) continue;
+      out.set(idCatalogKey(catalog.externalProductId), catalog);
+      out.set(titleCatalogKey(catalog.title), catalog);
+    }
+  }
+  return out;
+}
+
+/** Resolve a historical line against a current catalog without guessing. SKU
+ * wins; variant title is used only when it identifies exactly one variant. */
+export function resolveCatalogVariantCost(
+  line: Pick<ShopifyOrderCostLine, "sku" | "variantTitle">,
+  catalog: ShopifyProductVariantCatalog | undefined
+): ShopifyCatalogVariant | null {
+  if (!catalog) return null;
+  const sku = normalizedLookup(line.sku);
+  if (sku) {
+    const matches = catalog.variants.filter(
+      (variant) => normalizedLookup(variant.sku) === sku && variant.unitCost > 0
+    );
+    if (matches.length === 1) return matches[0];
+  }
+  const title = normalizedLookup(line.variantTitle);
+  if (!title) return null;
+  const matches = catalog.variants.filter(
+    (variant) => normalizedLookup(variant.title) === title && variant.unitCost > 0
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function findProductVariantCatalog(
+  catalogs: Map<string, ShopifyProductVariantCatalog>,
+  externalProductId: string | null,
+  title: string
+): ShopifyProductVariantCatalog | undefined {
+  return (
+    (externalProductId
+      ? catalogs.get(idCatalogKey(externalProductId))
+      : undefined) ?? catalogs.get(titleCatalogKey(title))
+  );
 }
 
 const PRODUCT_COSTS_QUERY = `

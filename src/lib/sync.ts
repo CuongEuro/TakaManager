@@ -17,9 +17,13 @@ import {
   fetchProductImages,
   fetchRefundsPage,
   fetchOrderLinesForCosts,
+  fetchProductVariantCatalogs,
   fetchVariantCosts,
+  findProductVariantCatalog,
   preserveUnitCostSnapshot,
+  resolveCatalogVariantCost,
   ShopifyCreds,
+  ShopifyOrderCostLine,
   ShopifyOrderLineNorm,
   ShopifyOrderNorm,
 } from "@/lib/shopify";
@@ -535,6 +539,8 @@ export interface CostSyncResult {
   missingCount: number;
   missingProducts: MissingBasecostItem[];
   missingTruncated: boolean;
+  nextCursor: string | null;
+  hasNext: boolean;
   error?: string;
 }
 
@@ -631,6 +637,8 @@ export async function syncStoreCosts(
     sinceDays?: number;
     fromYMD?: string;
     toYMD?: string;
+    cursor?: string;
+    limit?: number;
   } = {}
 ): Promise<CostSyncResult> {
   const { store, creds } = await storeCreds(storeId, organizationId);
@@ -643,6 +651,8 @@ export async function syncStoreCosts(
     missingCount: 0,
     missingProducts: [] as MissingBasecostItem[],
     missingTruncated: false,
+    nextCursor: null as string | null,
+    hasNext: false,
   };
   if (!creds)
     return { ...base, ok: false, error: "Thiếu Shopify domain hoặc khoá kết nối." };
@@ -663,11 +673,13 @@ export async function syncStoreCosts(
       : new Date();
   }
   const dateWindow = { gte: winStart, lt: winEnd };
+  const batchLimit = Math.max(1, Math.min(opts.limit ?? 10, 20));
 
   try {
     // Read only rows that are genuinely missing Basecost.
-    const missingLines = await prisma.orderLineItem.findMany({
+    const rows = await prisma.orderLineItem.findMany({
       where: {
+        ...(opts.cursor ? { id: { gt: opts.cursor } } : {}),
         unitCost: { lte: 0 },
         productId: { not: null },
         order: { storeId, date: dateWindow },
@@ -683,7 +695,12 @@ export async function syncStoreCosts(
         product: { select: { externalId: true } },
         order: { select: { externalId: true } },
       },
+      orderBy: { id: "asc" },
+      take: batchLimit + 1,
     });
+    const hasNext = rows.length > batchLimit;
+    const missingLines = rows.slice(0, batchLimit);
+    const nextCursor = hasNext ? missingLines[missingLines.length - 1]?.id ?? null : null;
     const productIds = new Set(
       missingLines.map((line) => line.productId).filter((id): id is string => !!id)
     );
@@ -732,59 +749,114 @@ export async function syncStoreCosts(
       }
     }
 
-    // Legacy rows have no stored variant ID. Query only their Shopify orders
-    // and match the exact line, instead of scanning the entire product catalog.
-    const legacy = missingLines.filter((line) => !line.externalVariantId);
+    // Anything not resolved by its stored variant ID is checked against the
+    // original order line. This also repairs stale IDs from deleted variants.
+    const unresolved = missingLines.filter((line) => {
+      const cost = line.externalVariantId
+        ? variantCosts.get(line.externalVariantId)
+        : undefined;
+      return !cost || cost.unitCost <= 0;
+    });
     const orderLines = await fetchOrderLinesForCosts(
       creds,
-      legacy
+      unresolved
         .map((line) => line.order.externalId)
         .filter((id): id is string => !!id)
     );
     const usedExternalLines = new Set<string>();
-    for (const local of legacy) {
+    const matchedLines: {
+      local: (typeof missingLines)[number];
+      remote: ShopifyOrderCostLine;
+    }[] = [];
+    const normalized = (value: string) => value.trim().replace(/\s+/g, " ");
+    for (const local of unresolved) {
       const orderId = local.order.externalId;
       if (!orderId) continue;
-      const candidates = orderLines.get(orderId) ?? [];
+      const candidates = (orderLines.get(orderId) ?? []).filter(
+        (line) => !usedExternalLines.has(line.externalLineItemId)
+      );
       const exact = local.externalLineItemId
-        ? candidates.find(
-            (line) =>
-              !usedExternalLines.has(line.externalLineItemId) &&
-              line.externalLineItemId === local.externalLineItemId
-          )
+        ? candidates.find((line) => line.externalLineItemId === local.externalLineItemId)
         : undefined;
-      const matched =
-        exact ??
-        candidates.find(
+      const tiers = [
+        candidates.filter(
           (line) =>
-            !usedExternalLines.has(line.externalLineItemId) &&
             line.externalProductId === local.product?.externalId &&
-            line.title === local.title &&
+            normalized(line.title) === normalized(local.title) &&
             line.quantity === local.quantity &&
             Math.abs(line.price - local.price) < 0.0001
-        );
+        ),
+        candidates.filter(
+          (line) =>
+            line.externalProductId === local.product?.externalId &&
+            normalized(line.title) === normalized(local.title)
+        ),
+        candidates.filter(
+          (line) =>
+            normalized(line.title) === normalized(local.title) &&
+            line.quantity === local.quantity &&
+            Math.abs(line.price - local.price) < 0.0001
+        ),
+        candidates.filter(
+          (line) => normalized(line.title) === normalized(local.title)
+        ),
+      ];
+      const matched = exact ?? tiers.find((matches) => matches.length === 1)?.[0];
       if (!matched) continue;
       usedExternalLines.add(matched.externalLineItemId);
-      const positive = matched.unitCost > 0;
+      matchedLines.push({ local, remote: matched });
+    }
+
+    const catalogCandidates = matchedLines.filter(
+      ({ remote }) => remote.unitCost <= 0
+    );
+    const catalogs = await fetchProductVariantCatalogs(
+      creds,
+      catalogCandidates.map(({ local, remote }) => ({
+        externalProductId:
+          remote.externalProductId ?? local.product?.externalId ?? null,
+        title: remote.title,
+      }))
+    );
+    for (const { local, remote } of matchedLines) {
+      const catalog = findProductVariantCatalog(
+        catalogs,
+        remote.externalProductId ?? local.product?.externalId ?? null,
+        remote.title
+      );
+      const catalogVariant =
+        remote.unitCost > 0 ? null : resolveCatalogVariantCost(remote, catalog);
+      const unitCost =
+        remote.unitCost > 0 ? remote.unitCost : catalogVariant?.unitCost ?? 0;
+      const variantId =
+        remote.unitCost > 0
+          ? remote.externalVariantId
+          : catalogVariant?.externalVariantId ?? remote.externalVariantId;
+      const inventoryItemId =
+        remote.unitCost > 0
+          ? remote.inventoryItemId
+          : catalogVariant?.inventoryItemId ?? remote.inventoryItemId;
       const res = await prisma.orderLineItem.updateMany({
         where: { id: local.id, unitCost: { lte: 0 } },
         data: {
-          externalLineItemId: matched.externalLineItemId,
-          externalVariantId: matched.externalVariantId,
-          inventoryItemId: matched.inventoryItemId,
-          ...(positive ? { unitCost: matched.unitCost } : {}),
+          externalLineItemId: remote.externalLineItemId,
+          externalVariantId: variantId,
+          inventoryItemId,
+          ...(unitCost > 0 ? { unitCost } : {}),
         },
       });
-      if (positive) {
+      if (unitCost > 0) {
         updated += res.count;
         if (local.productId) resolvedProducts.add(local.productId);
       }
     }
-    const missing = await findMissingBasecosts(organizationId, {
-      start: winStart,
-      end: winEnd,
-      storeId,
-    });
+    const missing = hasNext
+      ? { total: 0, items: [] as MissingBasecostItem[], truncated: false }
+      : await findMissingBasecosts(organizationId, {
+          start: winStart,
+          end: winEnd,
+          storeId,
+        });
     return {
       ...base,
       ok: true,
@@ -794,6 +866,8 @@ export async function syncStoreCosts(
       missingCount: missing.total,
       missingProducts: missing.items,
       missingTruncated: missing.truncated,
+      nextCursor,
+      hasNext,
     };
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
