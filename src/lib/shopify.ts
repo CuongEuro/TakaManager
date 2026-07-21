@@ -391,13 +391,37 @@ query ProductCosts($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on Product {
       id
-      variants(first: 100) { nodes { inventoryItem { unitCost { amount } } } }
+      variants(first: 250) {
+        pageInfo { hasNextPage endCursor }
+        nodes { inventoryItem { unitCost { amount } } }
+      }
+    }
+  }
+}`;
+
+const PRODUCT_COST_PAGE_QUERY = `
+query ProductCostPage($id: ID!, $cursor: String!) {
+  node(id: $id) {
+    ... on Product {
+      id
+      variants(first: 250, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { inventoryItem { unitCost { amount } } }
+      }
     }
   }
 }`;
 
 type VariantCostNode = {
   inventoryItem: { unitCost: { amount: string } | null } | null;
+};
+
+type ProductCostNode = {
+  id: string;
+  variants: {
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    nodes: VariantCostNode[];
+  };
 };
 
 export function firstPositiveUnitCost(variants: VariantCostNode[]): number | null {
@@ -408,10 +432,37 @@ export function firstPositiveUnitCost(variants: VariantCostNode[]): number | nul
   return null;
 }
 
-/** Fetch each product's "Cost per item": scan up to 100 variants and take the
- *  first cost > 0. Apparel often has more than 10 size/color variants, so the
- *  old limit produced false missing-cost warnings. Batched by 5 to stay under
- *  Shopify's GraphQL query-cost cap. Needs read_inventory. */
+async function fetchRemainingProductCost(
+  creds: ShopifyCreds,
+  productId: string,
+  firstCursor: string
+): Promise<number | null> {
+  let cursor: string | null = firstCursor;
+  // Shopify currently allows at most 2,048 variants per product. Twenty pages
+  // leaves ample headroom and prevents a malformed repeating cursor from
+  // keeping a serverless request alive forever.
+  for (let page = 0; page < 20 && cursor; page++) {
+    const data: { node: ProductCostNode | null } = await shopifyGraphQL<{
+      node: ProductCostNode | null;
+    }>(
+      creds,
+      PRODUCT_COST_PAGE_QUERY,
+      { id: productId, cursor }
+    );
+    const node: ProductCostNode | null = data.node;
+    if (!node) return null;
+    const cost = firstPositiveUnitCost(node.variants.nodes);
+    if (cost != null) return cost;
+    cursor = node.variants.pageInfo.hasNextPage
+      ? node.variants.pageInfo.endCursor
+      : null;
+  }
+  return null;
+}
+
+/** Fetch each product's "Cost per item" and scan every variant page until the
+ * first positive cost is found. POD products can exceed 100 size/color variants,
+ * so reading only the first page produced false missing-cost warnings. */
 export async function fetchProductCosts(
   creds: ShopifyCreds,
   productGids: string[]
@@ -419,35 +470,46 @@ export async function fetchProductCosts(
   const out = new Map<string, number>();
   if (productGids.length === 0) return out;
   const c = await resolveCreds(creds);
+  const uniqueIds = [...new Set(productGids)];
   const chunks: string[][] = [];
-  for (let i = 0; i < productGids.length; i += 5)
-    chunks.push(productGids.slice(i, i + 5));
+  // Three products × 250 variants stays under Shopify's 1,000-point maximum
+  // requested query cost. Run the first page sequentially so large POD catalogs
+  // do not flood a store's rate-limit bucket.
+  for (let i = 0; i < uniqueIds.length; i += 3)
+    chunks.push(uniqueIds.slice(i, i + 3));
 
-  // Chunks are independent GraphQL calls — a large catalog run one-by-one was
-  // slow enough (network round-trip × chunk count) to trip Vercel's 60s
-  // function cap. Run a bounded number in parallel instead; still far under
-  // Shopify's rate-limit bucket since each chunk is cheap.
-  const CONCURRENCY = 4;
-  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
-    const group = chunks.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(
-      group.map((ids) =>
-        shopifyGraphQL<{
-          nodes: ({
-            id: string;
-            variants: {
-              nodes: VariantCostNode[];
-            };
-          } | null)[];
-        }>(c, PRODUCT_COSTS_QUERY, { ids })
-      )
+  const remaining: { id: string; cursor: string }[] = [];
+  for (const ids of chunks) {
+    const data = await shopifyGraphQL<{ nodes: (ProductCostNode | null)[] }>(
+      c,
+      PRODUCT_COSTS_QUERY,
+      { ids }
     );
-    for (const data of results) {
-      for (const n of data.nodes) {
-        if (!n?.id) continue;
-        const cost = firstPositiveUnitCost(n.variants?.nodes ?? []);
-        if (cost != null) out.set(n.id, cost);
+    for (const node of data.nodes) {
+      if (!node?.id) continue;
+      const cost = firstPositiveUnitCost(node.variants.nodes);
+      if (cost != null) {
+        out.set(node.id, cost);
+      } else if (
+        node.variants.pageInfo.hasNextPage &&
+        node.variants.pageInfo.endCursor
+      ) {
+        remaining.push({ id: node.id, cursor: node.variants.pageInfo.endCursor });
       }
+    }
+  }
+
+  // Only products whose first 250 variants have no cost need more requests.
+  // Two workers keep this bounded while avoiding a long serial tail.
+  const CONCURRENCY = 2;
+  for (let i = 0; i < remaining.length; i += CONCURRENCY) {
+    const group = remaining.slice(i, i + CONCURRENCY);
+    const costs = await Promise.all(
+      group.map((item) => fetchRemainingProductCost(c, item.id, item.cursor))
+    );
+    for (let j = 0; j < group.length; j++) {
+      const cost = costs[j];
+      if (cost != null) out.set(group[j].id, cost);
     }
   }
   return out;
