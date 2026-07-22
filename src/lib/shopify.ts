@@ -219,8 +219,8 @@ function ordersQuery(journey: boolean, cost: boolean): string {
     ? `customerJourneySummary { lastVisit { source sourceType referrerUrl utmParameters { source medium campaign } } }`
     : "";
   const variantBlock = cost
-    ? `variant { id inventoryItem { id unitCost { amount } } }`
-    : `variant { id }`;
+    ? `variant { id title sku inventoryItem { id unitCost { amount } } }`
+    : `variant { id title sku }`;
   return `
 query Orders($cursor: String, $query: String) {
   orders(first: 10, after: $cursor, query: $query, sortKey: CREATED_AT) {
@@ -291,6 +291,8 @@ interface OrdersResp {
           } | null;
           variant: {
             id: string;
+            title: string;
+            sku: string | null;
             inventoryItem?: {
               id: string;
               unitCost: { amount: string } | null;
@@ -360,8 +362,8 @@ export function normalizeOrder(
       externalLineItemId: li.id,
       externalVariantId: li.variant?.id ?? null,
       inventoryItemId: li.variant?.inventoryItem?.id ?? null,
-      variantTitle: li.variantTitle ?? null,
-      sku: li.sku ?? null,
+      variantTitle: li.variant?.title ?? li.variantTitle ?? null,
+      sku: li.variant?.sku ?? li.sku ?? null,
       title: li.title,
       image: li.product?.featuredImage?.url ?? null,
       handle: li.product?.handle ?? null,
@@ -527,7 +529,7 @@ query OrderLinesForCost($ids: [ID!]!) {
           quantity
           originalUnitPriceSet { shopMoney { amount } }
           product { id }
-          variant { id inventoryItem { id unitCost { amount } } }
+          variant { id title sku inventoryItem { id unitCost { amount } } }
         }
       }
     }
@@ -576,6 +578,8 @@ export async function fetchOrderLinesForCosts(
                 product: { id: string } | null;
                 variant: {
                   id: string;
+                  title: string;
+                  sku: string | null;
                   inventoryItem: {
                     id: string;
                     unitCost: { amount: string } | null;
@@ -597,8 +601,8 @@ export async function fetchOrderLinesForCosts(
           externalVariantId: line.variant?.id ?? null,
           inventoryItemId: line.variant?.inventoryItem?.id ?? null,
           title: line.title,
-          variantTitle: line.variantTitle,
-          sku: line.sku,
+          variantTitle: line.variant?.title ?? line.variantTitle,
+          sku: line.variant?.sku ?? line.sku,
           quantity: line.quantity,
           price: num(line.originalUnitPriceSet?.shopMoney.amount),
           unitCost: num(line.variant?.inventoryItem?.unitCost?.amount),
@@ -671,7 +675,7 @@ function normalizedLookup(value: string | null | undefined): string {
     .toLocaleLowerCase();
 }
 
-function normalizedVariantTitle(value: string | null | undefined): string {
+function normalizedVariantOptions(value: string | null | undefined): string[] {
   return normalizedLookup(value)
     .replace(/[／｜|]/g, "/")
     .split("/")
@@ -682,8 +686,38 @@ function normalizedVariantTitle(value: string | null | undefined): string {
       return [bilingualPair[1].trim(), bilingualPair[2].trim()].sort().join("=");
     })
     .filter(Boolean)
-    .sort()
-    .join("/");
+    .sort();
+}
+
+function normalizedVariantTitle(value: string | null | undefined): string {
+  return normalizedVariantOptions(value).join("/");
+}
+
+function matchesSingleRenamedOption(
+  historicalTitle: string | null | undefined,
+  currentTitle: string | null | undefined
+): boolean {
+  const historical = normalizedVariantOptions(historicalTitle);
+  const current = normalizedVariantOptions(currentTitle);
+  if (historical.length === 0 || historical.length !== current.length) return false;
+
+  const remainingCurrent = [...current];
+  const unmatchedHistorical: string[] = [];
+  for (const option of historical) {
+    const index = remainingCurrent.indexOf(option);
+    if (index >= 0) remainingCurrent.splice(index, 1);
+    else unmatchedHistorical.push(option);
+  }
+  if (unmatchedHistorical.length !== 1 || remainingCurrent.length !== 1)
+    return false;
+
+  const oldOption = unmatchedHistorical[0].replace(/\s+/g, "");
+  const newOption = remainingCurrent[0].replace(/\s+/g, "");
+  return (
+    oldOption.length >= 3 &&
+    newOption.length >= 3 &&
+    (oldOption.includes(newOption) || newOption.includes(oldOption))
+  );
 }
 
 function titleCatalogKey(title: string): string {
@@ -820,17 +854,24 @@ export function resolveCatalogVariantCost(
   const sku = normalizedLookup(line.sku);
   if (sku) {
     const matches = catalog.variants.filter(
-      (variant) => normalizedLookup(variant.sku) === sku && variant.unitCost > 0
+      (variant) => normalizedLookup(variant.sku) === sku
     );
-    if (matches.length === 1) return matches[0];
+    if (matches.length === 1 && matches[0].unitCost > 0) return matches[0];
   }
   const title = normalizedVariantTitle(line.variantTitle);
   if (!title) return null;
   const matches = catalog.variants.filter(
-    (variant) =>
-      normalizedVariantTitle(variant.title) === title && variant.unitCost > 0
+    (variant) => normalizedVariantTitle(variant.title) === title
   );
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length > 0)
+    return matches.length === 1 && matches[0].unitCost > 0 ? matches[0] : null;
+
+  const renamedMatches = catalog.variants.filter(
+    (variant) => matchesSingleRenamedOption(line.variantTitle, variant.title)
+  );
+  return renamedMatches.length === 1 && renamedMatches[0].unitCost > 0
+    ? renamedMatches[0]
+    : null;
 }
 
 export function findProductVariantCatalog(

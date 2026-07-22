@@ -563,8 +563,8 @@ export async function ingestWebhookOrder(
                   externalProductId: line.externalProductId ?? cost.productId,
                   inventoryItemId: cost.inventoryItemId,
                   unitCost: cost.unitCost,
-                  variantTitle: line.variantTitle ?? cost.variantTitle,
-                  sku: line.sku ?? cost.sku,
+                  variantTitle: cost.variantTitle ?? line.variantTitle,
+                  sku: cost.sku ?? line.sku,
                   image: line.image ?? cost.productImage,
                   handle: line.handle ?? cost.productHandle,
                 }
@@ -1166,8 +1166,8 @@ export async function syncStoreCosts(
           externalLineItemId: remote.externalLineItemId,
           externalVariantId: variantId,
           inventoryItemId,
-          variantTitle: remote.variantTitle,
-          sku: remote.sku,
+          variantTitle: catalogVariant?.title ?? remote.variantTitle,
+          sku: catalogVariant?.sku ?? remote.sku,
           ...(unitCost > 0 ? { unitCost } : {}),
         },
       });

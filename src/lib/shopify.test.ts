@@ -9,6 +9,7 @@ import {
   fetchVariantCosts,
   firstPositiveUnitCost,
   normalizeInventoryCostWebhook,
+  normalizeOrder,
   normalizeWebhookOrder,
   preserveUnitCostSnapshot,
   resolveCatalogVariantCost,
@@ -201,13 +202,88 @@ test("does not guess when reordered option values match multiple variants", () =
   );
 });
 
-test("reads historical SKU and variant title for cost recovery", { concurrency: false }, async () => {
+test("resolves one renamed option only when size and color identify one variant", () => {
+  const catalog = {
+    externalProductId: "gid://shopify/Product/7124876886068",
+    title: "好きな文字入り 猫Tシャツ｜カスタム対応",
+    variants: [
+      {
+        externalVariantId: "gid://shopify/ProductVariant/1",
+        inventoryItemId: "gid://shopify/InventoryItem/1",
+        title: "綿（コットン） / 2XL / グレー",
+        sku: null,
+        unitCost: 644,
+      },
+      {
+        externalVariantId: "gid://shopify/ProductVariant/48037471027252",
+        inventoryItemId: "gid://shopify/InventoryItem/2",
+        title: "長袖Tシャツ / 2XL / グレー",
+        sku: null,
+        unitCost: 737,
+      },
+      {
+        externalVariantId: "gid://shopify/ProductVariant/3",
+        inventoryItemId: "gid://shopify/InventoryItem/3",
+        title: "トレーナ / 2XL / グレー",
+        sku: null,
+        unitCost: 980,
+      },
+      {
+        externalVariantId: "gid://shopify/ProductVariant/4",
+        inventoryItemId: "gid://shopify/InventoryItem/4",
+        title: "パーカー / 2XL / グレー",
+        sku: null,
+        unitCost: 1200,
+      },
+    ],
+  };
+
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "2XL / グレー / Tシャツ" },
+      catalog
+    )?.externalVariantId,
+    "gid://shopify/ProductVariant/48037471027252"
+  );
+});
+
+test("does not guess when an old option name matches multiple renamed styles", () => {
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "2XL / グレー / Tシャツ" },
+      {
+        externalProductId: "gid://shopify/Product/202",
+        title: "Cat shirt",
+        variants: [
+          {
+            externalVariantId: "gid://shopify/ProductVariant/1",
+            inventoryItemId: "gid://shopify/InventoryItem/1",
+            title: "長袖Tシャツ / 2XL / グレー",
+            sku: null,
+            unitCost: 737,
+          },
+          {
+            externalVariantId: "gid://shopify/ProductVariant/2",
+            inventoryItemId: "gid://shopify/InventoryItem/2",
+            title: "半袖Tシャツ / 2XL / グレー",
+            sku: null,
+            unitCost: 0,
+          },
+        ],
+      }
+    ),
+    null
+  );
+});
+
+test("cost recovery prefers current variant metadata but preserves deleted snapshots", { concurrency: false }, async () => {
   const originalFetch = globalThis.fetch;
   const orderId = "gid://shopify/Order/99";
   globalThis.fetch = (async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as { query: string };
     assert.match(body.query, /variantTitle/);
     assert.match(body.query, /\bsku\b/);
+    assert.match(body.query, /variant\s*\{\s*id\s+title\s+sku/);
     return new Response(
       JSON.stringify({
         data: {
@@ -216,6 +292,24 @@ test("reads historical SKU and variant title for cost recovery", { concurrency: 
               id: orderId,
               lineItems: {
                 nodes: [
+                  {
+                    id: "gid://shopify/LineItem/100",
+                    title: "Cat shirt",
+                    variantTitle: "2XL / グレー / Tシャツ",
+                    sku: null,
+                    quantity: 1,
+                    originalUnitPriceSet: { shopMoney: { amount: "4180" } },
+                    product: { id: "gid://shopify/Product/7124876886068" },
+                    variant: {
+                      id: "gid://shopify/ProductVariant/48037471027252",
+                      title: "長袖Tシャツ / 2XL / グレー",
+                      sku: "LONG-2XL-GRAY",
+                      inventoryItem: {
+                        id: "gid://shopify/InventoryItem/200",
+                        unitCost: { amount: "737" },
+                      },
+                    },
+                  },
                   {
                     id: "gid://shopify/LineItem/101",
                     title: "Cat shirt",
@@ -241,11 +335,61 @@ test("reads historical SKU and variant title for cost recovery", { concurrency: 
       { shopifyDomain: "example.myshopify.com", shopifyToken: "test-token" },
       [orderId]
     );
-    assert.equal(orders.get(orderId)?.[0].sku, "CAT-S-W");
-    assert.equal(orders.get(orderId)?.[0].variantTitle, "Cotton / S / White");
+    assert.equal(orders.get(orderId)?.[0].sku, "LONG-2XL-GRAY");
+    assert.equal(
+      orders.get(orderId)?.[0].variantTitle,
+      "長袖Tシャツ / 2XL / グレー"
+    );
+    assert.equal(orders.get(orderId)?.[0].unitCost, 737);
+    assert.equal(orders.get(orderId)?.[1].sku, "CAT-S-W");
+    assert.equal(orders.get(orderId)?.[1].variantTitle, "Cotton / S / White");
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("order sync stores the current variant title when Shopify renamed it", () => {
+  const order = normalizeOrder(
+    {
+      id: "gid://shopify/Order/99",
+      createdAt: "2026-07-21T00:00:00Z",
+      sourceName: "web",
+      totalDiscountsSet: null,
+      totalTaxSet: null,
+      currentTotalTaxSet: null,
+      totalShippingPriceSet: null,
+      totalRefundedSet: null,
+      customerJourneySummary: null,
+      lineItems: {
+        nodes: [
+          {
+            id: "gid://shopify/LineItem/100",
+            title: "Cat shirt",
+            variantTitle: "2XL / グレー / Tシャツ",
+            sku: null,
+            quantity: 1,
+            originalUnitPriceSet: { shopMoney: { amount: "4180" } },
+            product: null,
+            variant: {
+              id: "gid://shopify/ProductVariant/48037471027252",
+              title: "長袖Tシャツ / 2XL / グレー",
+              sku: "LONG-2XL-GRAY",
+              inventoryItem: {
+                id: "gid://shopify/InventoryItem/200",
+                unitCost: { amount: "737" },
+              },
+            },
+          },
+        ],
+      },
+    },
+    false
+  );
+
+  assert.equal(order.lineItems[0].externalVariantId, "gid://shopify/ProductVariant/48037471027252");
+  assert.equal(order.lineItems[0].variantTitle, "長袖Tシャツ / 2XL / グレー");
+  assert.equal(order.lineItems[0].sku, "LONG-2XL-GRAY");
+  assert.equal(order.lineItems[0].unitCost, 737);
 });
 
 test("manual order sync uses a bounded page without inventory cost", { concurrency: false }, async () => {
