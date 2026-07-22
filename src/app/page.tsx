@@ -20,6 +20,7 @@ import {
 import { Card, StatCard, PageHeader, Select, EmptyState, Badge } from "@/components/ui";
 import { DashboardChart } from "@/components/DashboardChart";
 import { ChannelEfficiencyTrendChart } from "@/components/ChannelEfficiencyTrendChart";
+import { ProductThumbnail } from "@/components/ProductThumbnail";
 import { calendarDateInTimeZone, calendarYMD, DEFAULT_TZ } from "@/lib/dates";
 import type { MissingBasecostItem } from "@/lib/sync";
 
@@ -632,11 +633,9 @@ export default function DashboardPage() {
                       <span className="w-5 text-center text-xs font-bold text-slate-400">
                         {i + 1}
                       </span>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={p.image || "https://placehold.co/40x40?text=POD"}
+                      <ProductThumbnail
+                        src={p.image}
                         alt={p.title}
-                        className="h-10 w-10 rounded-md object-cover"
                       />
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-sm font-medium text-slate-700">

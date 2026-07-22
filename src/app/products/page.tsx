@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
+import { ProductThumbnail } from "@/components/ProductThumbnail";
 import { ORDER_CHANNEL_LABELS } from "@/lib/constants";
 import { formatJPY, formatNumber, formatPercent } from "@/lib/format";
 import {
@@ -218,11 +219,9 @@ function ProductsInner() {
                     </Td>
                     <Td>
                       <div className="flex min-w-[220px] items-center gap-3">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={p.image || "https://placehold.co/40x40?text=POD"}
+                        <ProductThumbnail
+                          src={p.image}
                           alt={p.title}
-                          className="h-10 w-10 shrink-0 rounded-md object-cover"
                         />
                         <span className="line-clamp-2 text-sm font-medium text-slate-700">
                           {p.title}
