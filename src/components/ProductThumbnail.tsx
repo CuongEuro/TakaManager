@@ -24,7 +24,8 @@ export function ProductThumbnail({
   className?: string;
 }) {
   const [preview, setPreview] = useState<PreviewPosition | null>(null);
-  const imageSrc = src || FALLBACK_IMAGE;
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const imageSrc = src && failedSrc !== src ? src : FALLBACK_IMAGE;
 
   useEffect(() => {
     if (!preview) return;
@@ -79,6 +80,9 @@ export function ProductThumbnail({
           className={`h-10 w-10 rounded-md object-cover ${className}`}
           loading="lazy"
           decoding="async"
+          onError={() => {
+            if (imageSrc !== FALLBACK_IMAGE) setFailedSrc(imageSrc);
+          }}
         />
       </span>
 
@@ -100,6 +104,9 @@ export function ProductThumbnail({
               src={imageSrc}
               alt=""
               className="h-full w-full rounded-lg object-contain"
+              onError={() => {
+                if (imageSrc !== FALLBACK_IMAGE) setFailedSrc(imageSrc);
+              }}
             />
           </div>,
           document.body,

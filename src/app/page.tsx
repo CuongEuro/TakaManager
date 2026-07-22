@@ -67,6 +67,7 @@ export default function DashboardPage() {
     return { from: today, to: today };
   });
   const [storeId, setStoreId] = useState<string>("");
+  const [productsPage, setProductsPage] = useState(1);
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingAds, setRefreshingAds] = useState(false);
@@ -79,9 +80,10 @@ export default function DashboardPage() {
       to: calendarYMD(range.to),
     });
     if (storeId) params.set("storeId", storeId);
+    params.set("productsPage", String(productsPage));
     const r = await fetch(`/api/dashboard?${params}`);
     return r.json();
-  }, [range, storeId]);
+  }, [range, storeId, productsPage]);
 
   // Load dashboard data whenever range/store changes (no ad refresh here).
   useEffect(() => {
@@ -222,7 +224,13 @@ export default function DashboardPage() {
         subtitle={`Tổng quan doanh thu, chi phí & lợi nhuận theo thời gian — múi giờ ${DEFAULT_TZ} (GMT+9).`}
         actions={
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-            <DateRangePicker value={range} onChange={setRange} />
+            <DateRangePicker
+              value={range}
+              onChange={(value) => {
+                setRange(value);
+                setProductsPage(1);
+              }}
+            />
             <button
               onClick={refreshAdsNow}
               disabled={refreshingAds}
@@ -240,7 +248,13 @@ export default function DashboardPage() {
               {refreshingCosts ? "Đang cập nhật Basecost…" : "🔄 Cập nhật Basecost"}
             </button>
             <div className="w-full sm:w-44">
-              <Select value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+              <Select
+                value={storeId}
+                onChange={(e) => {
+                  setStoreId(e.target.value);
+                  setProductsPage(1);
+                }}
+              >
                 <option value="">Tất cả store</option>
                 {data?.storeOptions.map((st) => (
                   <option key={st.id} value={st.id}>
@@ -625,22 +639,40 @@ export default function DashboardPage() {
               ) : (
                 <div className="space-y-2">
                   {data?.bestSellers.map((p, i) => (
-                    <Link
+                    <div
                       key={p.productId ?? p.title}
-                      href={productsHref}
                       className="-mx-2 flex items-center gap-3 rounded-lg px-2 py-1 transition hover:bg-slate-50"
                     >
                       <span className="w-5 text-center text-xs font-bold text-slate-400">
-                        {i + 1}
+                        {(data.bestSellersPage - 1) * data.bestSellersPageSize + i + 1}
                       </span>
-                      <ProductThumbnail
-                        src={p.image}
-                        alt={p.title}
-                      />
+                      {p.storefrontUrl ? (
+                        <a
+                          href={p.storefrontUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="Mở sản phẩm trên store"
+                        >
+                          <ProductThumbnail src={p.image} alt={p.title} />
+                        </a>
+                      ) : (
+                        <ProductThumbnail src={p.image} alt={p.title} />
+                      )}
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-slate-700">
-                          {p.title}
-                        </div>
+                        {p.storefrontUrl ? (
+                          <a
+                            href={p.storefrontUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block truncate text-sm font-medium text-brand-700 hover:underline"
+                          >
+                            {p.title} ↗
+                          </a>
+                        ) : (
+                          <div className="truncate text-sm font-medium text-slate-700">
+                            {p.title}
+                          </div>
+                        )}
                         <div className="text-xs text-slate-400">
                           {formatNumber(p.units)} cái · {formatNumber(p.orders)} đơn
                         </div>
@@ -648,8 +680,33 @@ export default function DashboardPage() {
                       <div className="text-sm font-semibold text-slate-700">
                         {formatJPY(p.revenue)}
                       </div>
-                    </Link>
+                    </div>
                   ))}
+                </div>
+              )}
+              {data && data.bestSellersTotalPages > 1 && (
+                <div className="mt-3 flex items-center justify-end gap-2 border-t border-slate-100 pt-3">
+                  <button
+                    type="button"
+                    disabled={data.bestSellersPage <= 1 || loading}
+                    onClick={() => setProductsPage((page) => Math.max(1, page - 1))}
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    ← Trước
+                  </button>
+                  <span className="text-xs text-slate-500">
+                    Trang {data.bestSellersPage}/{data.bestSellersTotalPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      data.bestSellersPage >= data.bestSellersTotalPages || loading
+                    }
+                    onClick={() => setProductsPage((page) => page + 1)}
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    Sau →
+                  </button>
                 </div>
               )}
             </Card>

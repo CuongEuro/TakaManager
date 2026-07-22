@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 import { prisma } from "@/lib/prisma";
 import { customRange, isoDay, DEFAULT_TZ, proratePeriodic } from "@/lib/dates";
+import { shopifyProductUrl } from "@/lib/shopify";
 
 export interface PnlInput {
   organizationId: string; // tenant scope (required)
@@ -11,6 +12,8 @@ export interface PnlInput {
   end: Date; // exclusive
   storeId?: string | null; // null/undefined = all stores
   timezone?: string; // IANA tz for daily bucketing (default Asia/Tokyo)
+  bestSellerPage?: number;
+  bestSellerPageSize?: number;
 }
 
 export interface RevenueBlock {
@@ -84,6 +87,7 @@ export interface BestSeller {
   productId: string | null;
   title: string;
   image: string | null;
+  storefrontUrl: string | null;
   orders: number;
   units: number;
   revenue: number;
@@ -130,6 +134,10 @@ export interface DashboardData {
   daily: DailyPoint[];
   stores: StoreRow[];
   bestSellers: BestSeller[];
+  bestSellersPage: number;
+  bestSellersPageSize: number;
+  bestSellersTotal: number;
+  bestSellersTotalPages: number;
   channels: ChannelRow[];
   catalogs: CatalogRow[];
   channelEfficiency: ChannelEfficiencyRow[];
@@ -150,7 +158,11 @@ type OrderWithItems = {
   channel: string | null;
   // Prices on Shopify are tax-inclusive (JP 税込); back out tax per the store's
   // rate. cogsSource picks COGS method (RULE vs COST_PER_ITEM).
-  store: { taxRate: number; cogsSource: string } | null;
+  store: {
+    taxRate: number;
+    cogsSource: string;
+    shopifyDomain?: string | null;
+  } | null;
   lineItems: {
     productId: string | null;
     title: string;
@@ -158,7 +170,12 @@ type OrderWithItems = {
     quantity: number;
     price: number;
     unitCost: number; // Shopify "Cost per item" snapshot
-    product: { baseCost: number; catalog: string | null; image: string | null } | null;
+    product: {
+      baseCost: number;
+      catalog: string | null;
+      image: string | null;
+      handle?: string | null;
+    } | null;
   }[];
 };
 
@@ -354,7 +371,9 @@ export async function computeDashboard(
       where: { organizationId, date: { gte: start, lt: end }, ...storeFilter },
       include: {
         lineItems: { include: { product: true } },
-        store: { select: { taxRate: true, cogsSource: true } },
+        store: {
+          select: { taxRate: true, cogsSource: true, shopifyDomain: true },
+        },
       },
     }),
     prisma.costRule.findMany({ where: { organizationId, active: true } }),
@@ -423,7 +442,21 @@ export async function computeDashboard(
     tz,
     companyRevenue
   );
-  const bestSellers = buildBestSellers(orders);
+  const allBestSellers = buildBestSellers(orders);
+  const bestSellersPageSize = Math.min(20, Math.max(5, input.bestSellerPageSize ?? 10));
+  const bestSellersTotal = allBestSellers.length;
+  const bestSellersTotalPages = Math.max(
+    1,
+    Math.ceil(bestSellersTotal / bestSellersPageSize)
+  );
+  const bestSellersPage = Math.min(
+    Math.max(1, input.bestSellerPage ?? 1),
+    bestSellersTotalPages
+  );
+  const bestSellers = allBestSellers.slice(
+    (bestSellersPage - 1) * bestSellersPageSize,
+    bestSellersPage * bestSellersPageSize
+  );
   const channels = buildChannelBreakdown(orders);
   const catalogs = buildCatalogBreakdown(orders);
   const channelEfficiency = buildChannelEfficiency(channels, adSpends);
@@ -444,6 +477,10 @@ export async function computeDashboard(
     daily,
     stores,
     bestSellers,
+    bestSellersPage,
+    bestSellersPageSize,
+    bestSellersTotal,
+    bestSellersTotalPages,
     channels,
     catalogs,
     channelEfficiency,
@@ -894,15 +931,20 @@ function buildBestSellers(orders: OrderWithItems[]): BestSeller[] {
   for (const o of orders) {
     for (const li of o.lineItems) {
       const key = li.productId ?? `title:${li.title}`;
-      // line-item image (may be null on webhook orders) → fall back to the
-      // product's stored featured image.
-      const img = li.image ?? li.product?.image ?? null;
+      // Prefer refreshed product media; old webhook rows may have no image,
+      // while old synced line items may contain a stale image URL.
+      const img = li.product?.image ?? li.image ?? null;
+      const storefrontUrl = shopifyProductUrl(
+        o.store?.shopifyDomain,
+        li.product?.handle
+      );
       const cur =
         map.get(key) ??
         ({
           productId: li.productId,
           title: li.title,
           image: img,
+          storefrontUrl,
           orders: 0,
           units: 0,
           revenue: 0,
@@ -911,12 +953,12 @@ function buildBestSellers(orders: OrderWithItems[]): BestSeller[] {
       cur.revenue += li.price * li.quantity * (1 - (o.store?.taxRate ?? 0));
       cur.orders += 1;
       if (!cur.image && img) cur.image = img;
+      if (!cur.storefrontUrl && storefrontUrl) cur.storefrontUrl = storefrontUrl;
       map.set(key, cur);
     }
   }
   return Array.from(map.values())
-    .sort((a, b) => b.revenue - a.revenue)
-    .slice(0, 10);
+    .sort((a, b) => b.revenue - a.revenue);
 }
 
 function sum<T>(arr: T[], f: (x: T) => number): number {

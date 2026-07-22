@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { customRange, resolveRange, RangePreset, DEFAULT_TZ } from "@/lib/dates";
 import { getSession } from "@/lib/auth";
+import { shopifyProductUrl } from "@/lib/shopify";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,7 @@ type Agg = {
   productId: string | null;
   title: string;
   image: string | null;
+  storefrontUrl: string | null;
   orders: number;
   units: number;
   revenue: number;
@@ -58,7 +60,9 @@ export async function GET(req: NextRequest) {
       select: {
         storeId: true,
         channel: true,
-        store: { select: { taxRate: true, cogsSource: true } },
+        store: {
+          select: { taxRate: true, cogsSource: true, shopifyDomain: true },
+        },
         lineItems: {
           select: {
             productId: true,
@@ -67,7 +71,7 @@ export async function GET(req: NextRequest) {
             quantity: true,
             price: true,
             unitCost: true,
-            product: { select: { baseCost: true, image: true } },
+            product: { select: { baseCost: true, image: true, handle: true } },
           },
         },
       },
@@ -107,7 +111,11 @@ export async function GET(req: NextRequest) {
     const seenThisOrder = new Set<string>();
     for (const li of o.lineItems) {
       const key = li.productId ?? `title:${li.title}`;
-      const img = li.image ?? li.product?.image ?? null;
+      const img = li.product?.image ?? li.image ?? null;
+      const storefrontUrl = shopifyProductUrl(
+        o.store?.shopifyDomain,
+        li.product?.handle
+      );
       const lineVal = li.price * li.quantity;
 
       let cogs = 0;
@@ -140,6 +148,7 @@ export async function GET(req: NextRequest) {
           productId: li.productId,
           title: li.title,
           image: img,
+          storefrontUrl,
           orders: 0,
           units: 0,
           revenue: 0,
@@ -150,6 +159,7 @@ export async function GET(req: NextRequest) {
       cur.revenue += lineVal * (1 - rate);
       cur.cogs += cogs;
       if (!cur.image && img) cur.image = img;
+      if (!cur.storefrontUrl && storefrontUrl) cur.storefrontUrl = storefrontUrl;
       // Count each order once per product (an order may repeat a product on
       // several lines — variants).
       if (!seenThisOrder.has(key)) {
@@ -191,6 +201,7 @@ export async function GET(req: NextRequest) {
       productId: r.productId,
       title: r.title,
       image: r.image,
+      storefrontUrl: r.storefrontUrl,
       orders: r.orders,
       units: r.units,
       revenue: r.revenue,

@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // SYNC ORCHESTRATOR — pull Shopify orders into the DB (idempotent).
-// Products are derived from the order line items (title + image only) — we do
+// Products are derived from order lines (title + image + handle) — we do
 // NOT fetch the full catalog, so syncs stay small/fast and need no read_inventory.
 // Upserts by (storeId, externalId) so re-running never duplicates.
 //
@@ -13,7 +13,7 @@ import { prisma } from "@/lib/prisma";
 import {
   fetchOrdersPage,
   fetchOrdersSince,
-  fetchProductImages,
+  fetchProductMedia,
   fetchRefundsPage,
   fetchOrderLinesForCosts,
   fetchProductVariantCatalogs,
@@ -74,23 +74,30 @@ function resolveSince(opts: SyncOpts, lastSyncedAt: Date | null): Date {
     : daysAgo(7);
 }
 
-/** Derive minimal products (title+image) from a batch of orders and upsert them.
+/** Derive minimal products (title+image+handle) from orders and upsert them.
  *  Returns externalProductId → internal product id, to link line items. */
 async function upsertProductsFromOrders(
   orders: ShopifyOrderNorm[],
   storeId: string,
   organizationId: string
 ): Promise<Map<string, string>> {
-  const derived = new Map<string, { title: string; image: string | null }>();
+  const derived = new Map<
+    string,
+    { title: string; image: string | null; handle: string | null }
+  >();
   for (const o of orders)
     for (const li of o.lineItems) {
       if (!li.externalProductId) continue;
       const prev = derived.get(li.externalProductId);
       if (!prev) {
-        derived.set(li.externalProductId, { title: li.title, image: li.image });
-      } else if (!prev.image && li.image) {
-        // keep the first non-null image we see for this product in the batch
-        prev.image = li.image;
+        derived.set(li.externalProductId, {
+          title: li.title,
+          image: li.image,
+          handle: li.handle,
+        });
+      } else {
+        if (!prev.image && li.image) prev.image = li.image;
+        if (!prev.handle && li.handle) prev.handle = li.handle;
       }
     }
 
@@ -104,11 +111,16 @@ async function upsertProductsFromOrders(
         externalId,
         title: p.title,
         image: p.image,
+        handle: p.handle,
         // baseCost not pulled from Shopify → COGS comes from Cost Rules.
       },
       // Refresh title; only set image when we actually have one so a webhook
       // order (which carries no product image) never wipes a synced image.
-      update: { title: p.title, ...(p.image ? { image: p.image } : {}) },
+      update: {
+        title: p.title,
+        ...(p.image ? { image: p.image } : {}),
+        ...(p.handle ? { handle: p.handle } : {}),
+      },
     });
     map.set(externalId, saved.id);
   }
@@ -211,37 +223,140 @@ async function upsertOrders(
   }
 }
 
-/** Backfill featured images for this store's products that are still missing one
- *  (e.g. products that only arrived via image-less webhook orders). Best-effort:
- *  capped per run and never fails the sync. Returns how many were filled. */
-async function backfillStoreImages(
+/** Backfill media for products that arrived through image-less webhooks. */
+async function backfillStoreMedia(
   storeId: string,
   organizationId: string,
   creds: ShopifyCreds
 ): Promise<number> {
   try {
     const missing = await prisma.product.findMany({
-      where: { organizationId, storeId, image: null, externalId: { not: null } },
+      where: {
+        organizationId,
+        storeId,
+        externalId: { not: null },
+        OR: [{ image: null }, { handle: null }],
+      },
       select: { id: true, externalId: true },
       take: 250,
     });
     if (missing.length === 0) return 0;
-    const imgs = await fetchProductImages(
+    const media = await fetchProductMedia(
       creds,
       missing.map((m) => m.externalId!).filter(Boolean)
     );
     let updated = 0;
     for (const m of missing) {
-      const url = m.externalId ? imgs.get(m.externalId) : undefined;
-      if (url) {
-        await prisma.product.update({ where: { id: m.id }, data: { image: url } });
+      const item = m.externalId ? media.get(m.externalId) : undefined;
+      if (item?.image || item?.handle) {
+        await prisma.product.update({
+          where: { id: m.id },
+          data: {
+            ...(item.image ? { image: item.image } : {}),
+            ...(item.handle ? { handle: item.handle } : {}),
+          },
+        });
         updated++;
       }
     }
     return updated;
   } catch {
-    return 0; // image backfill is non-critical
+    return 0; // media backfill is non-critical
   }
+}
+
+export interface ProductMediaPageResult {
+  ok: boolean;
+  scanned: number;
+  updated: number;
+  total: number | null;
+  nextCursor: string | null;
+  hasNext: boolean;
+  errors: string[];
+}
+
+/** Refresh one bounded page of Shopify product images + handles. The browser
+ * loops this endpoint, so large catalogs cannot exhaust a serverless request. */
+export async function refreshProductMediaPage(
+  organizationId: string,
+  opts: { storeId: string; cursor?: string | null; limit?: number }
+): Promise<ProductMediaPageResult> {
+  const { store, creds } = await storeCreds(opts.storeId, organizationId);
+  if (!creds) {
+    return {
+      ok: true,
+      scanned: 0,
+      updated: 0,
+      total: 0,
+      nextCursor: null,
+      hasNext: false,
+      errors: [`${store?.name ?? opts.storeId}: thiếu khoá kết nối Shopify`],
+    };
+  }
+
+  const limit = Math.min(100, Math.max(10, opts.limit ?? 100));
+  const where = {
+    organizationId,
+    storeId: opts.storeId,
+    active: true,
+    externalId: { not: null as string | null },
+    ...(opts.cursor ? { id: { gt: opts.cursor } } : {}),
+  };
+  const [rows, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      orderBy: { id: "asc" },
+      take: limit + 1,
+      select: { id: true, externalId: true },
+    }),
+    opts.cursor
+      ? Promise.resolve(null)
+      : prisma.product.count({
+          where: {
+            organizationId,
+            storeId: opts.storeId,
+            active: true,
+            externalId: { not: null },
+          },
+        }),
+  ]);
+
+  const page = rows.slice(0, limit);
+  const hasNext = rows.length > limit;
+  const nextCursor = hasNext ? page[page.length - 1]?.id ?? null : null;
+  const media = await fetchProductMedia(
+    creds,
+    page.map((product) => product.externalId!).filter(Boolean)
+  );
+  const updates = page.flatMap((product) => {
+    const item = product.externalId ? media.get(product.externalId) : undefined;
+    return item?.image || item?.handle
+      ? [{ id: product.id, image: item.image, handle: item.handle }]
+      : [];
+  });
+  if (updates.length > 0) {
+    await prisma.$transaction(
+      updates.map((product) =>
+        prisma.product.update({
+          where: { id: product.id },
+          data: {
+            ...(product.image ? { image: product.image } : {}),
+            ...(product.handle ? { handle: product.handle } : {}),
+          },
+        })
+      )
+    );
+  }
+
+  return {
+    ok: true,
+    scanned: page.length,
+    updated: updates.length,
+    total,
+    nextCursor,
+    hasNext,
+    errors: [],
+  };
 }
 
 /** Ingest a batch of already-normalized orders (used by the webhook receiver).
@@ -267,32 +382,59 @@ export async function ingestWebhookOrder(
   const { store, creds } = await storeCreds(storeId, organizationId);
   let costsResolved = 0;
   let enriched = order;
-  if (creds && store?.cogsSource === "COST_PER_ITEM") {
+  if (creds) {
     try {
-      const costs = await fetchVariantCosts(
-        creds,
-        order.lineItems
-          .map((line) => line.externalVariantId)
-          .filter((id): id is string => !!id)
-      );
-      enriched = {
-        ...order,
-        lineItems: order.lineItems.map((line) => {
-          const cost = line.externalVariantId
-            ? costs.get(line.externalVariantId)
-            : undefined;
-          if (cost && cost.unitCost > 0) costsResolved++;
-          return cost
-            ? {
-                ...line,
-                inventoryItemId: cost.inventoryItemId,
-                unitCost: cost.unitCost,
-              }
-            : line;
-        }),
-      };
+      if (store?.cogsSource === "COST_PER_ITEM") {
+        const costs = await fetchVariantCosts(
+          creds,
+          order.lineItems
+            .map((line) => line.externalVariantId)
+            .filter((id): id is string => !!id)
+        );
+        enriched = {
+          ...order,
+          lineItems: order.lineItems.map((line) => {
+            const cost = line.externalVariantId
+              ? costs.get(line.externalVariantId)
+              : undefined;
+            if (cost && cost.unitCost > 0) costsResolved++;
+            return cost
+              ? {
+                  ...line,
+                  externalProductId: line.externalProductId ?? cost.productId,
+                  inventoryItemId: cost.inventoryItemId,
+                  unitCost: cost.unitCost,
+                  image: line.image ?? cost.productImage,
+                  handle: line.handle ?? cost.productHandle,
+                }
+              : line;
+          }),
+        };
+      } else {
+        const media = await fetchProductMedia(
+          creds,
+          order.lineItems
+            .map((line) => line.externalProductId)
+            .filter((id): id is string => !!id)
+        );
+        enriched = {
+          ...order,
+          lineItems: order.lineItems.map((line) => {
+            const item = line.externalProductId
+              ? media.get(line.externalProductId)
+              : undefined;
+            return item
+              ? {
+                  ...line,
+                  image: line.image ?? item.image,
+                  handle: line.handle ?? item.handle,
+                }
+              : line;
+          }),
+        };
+      }
     } catch (error) {
-      console.error("Shopify webhook variant cost lookup error:", error);
+      console.error("Shopify webhook product enrichment error:", error);
     }
   }
   const result = await ingestOrders(storeId, organizationId, [enriched]);
@@ -914,7 +1056,7 @@ export async function syncStore(
       where: { id: storeId },
       data: { lastSyncedAt: new Date() },
     });
-    await backfillStoreImages(storeId, organizationId, creds);
+    await backfillStoreMedia(storeId, organizationId, creds);
     return {
       storeId,
       storeName,

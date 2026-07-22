@@ -26,6 +26,7 @@ export interface ShopifyOrderLineNorm {
   inventoryItemId: string | null;
   title: string;
   image: string | null;
+  handle: string | null;
   quantity: number;
   price: number; // original unit price
   unitCost: number; // Shopify "Cost per item" (variant), 0 if not fetched/available
@@ -54,6 +55,15 @@ const DEFAULT_VERSION = "2025-01";
 function shopBase(creds: ShopifyCreds): string {
   const domain = creds.shopifyDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
   return `https://${domain}`;
+}
+
+export function shopifyProductUrl(
+  shopifyDomain: string | null | undefined,
+  handle: string | null | undefined
+): string | null {
+  if (!shopifyDomain || !handle) return null;
+  const domain = shopifyDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  return domain ? `https://${domain}/products/${encodeURIComponent(handle)}` : null;
 }
 
 function endpoint(creds: ShopifyCreds): string {
@@ -229,7 +239,7 @@ query Orders($cursor: String, $query: String) {
           title
           quantity
           originalUnitPriceSet { shopMoney { amount } }
-          product { id featuredImage { url } }
+          product { id handle featuredImage { url } }
           ${variantBlock}
         }
       }
@@ -268,7 +278,11 @@ interface OrdersResp {
           title: string;
           quantity: number;
           originalUnitPriceSet: { shopMoney: { amount: string } } | null;
-          product: { id: string; featuredImage: { url: string } | null } | null;
+          product: {
+            id: string;
+            handle: string;
+            featuredImage: { url: string } | null;
+          } | null;
           variant: {
             id: string;
             inventoryItem?: {
@@ -342,6 +356,7 @@ export function normalizeOrder(
       inventoryItemId: li.variant?.inventoryItem?.id ?? null,
       title: li.title,
       image: li.product?.featuredImage?.url ?? null,
+      handle: li.product?.handle ?? null,
       quantity: li.quantity,
       price,
       unitCost: num(li.variant?.inventoryItem?.unitCost?.amount),
@@ -377,29 +392,41 @@ export interface OrdersPage {
   usedJourney: boolean;
 }
 
-const PRODUCT_IMAGES_QUERY = `
-query ProductImages($ids: [ID!]!) {
+const PRODUCT_MEDIA_QUERY = `
+query ProductMedia($ids: [ID!]!) {
   nodes(ids: $ids) {
-    ... on Product { id featuredImage { url } }
+    ... on Product { id handle featuredImage { url } }
   }
 }`;
 
-/** Fetch featuredImage URLs for a set of product GIDs (batched by 100).
- *  Used to backfill images for products derived from orders (incl. webhooks). */
-export async function fetchProductImages(
+export interface ShopifyProductMedia {
+  image: string | null;
+  handle: string | null;
+}
+
+/** Fetch storefront media for product GIDs in bounded Shopify batches. */
+export async function fetchProductMedia(
   creds: ShopifyCreds,
   productGids: string[]
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, ShopifyProductMedia>> {
+  const out = new Map<string, ShopifyProductMedia>();
   if (productGids.length === 0) return out;
   const c = await resolveCreds(creds);
   for (let i = 0; i < productGids.length; i += 100) {
     const ids = productGids.slice(i, i + 100);
     const data = await shopifyGraphQL<{
-      nodes: ({ id: string; featuredImage: { url: string } | null } | null)[];
-    }>(c, PRODUCT_IMAGES_QUERY, { ids });
+      nodes: (
+        | { id: string; handle: string; featuredImage: { url: string } | null }
+        | null
+      )[];
+    }>(c, PRODUCT_MEDIA_QUERY, { ids });
     for (const n of data.nodes) {
-      if (n?.featuredImage?.url) out.set(n.id, n.featuredImage.url);
+      if (n?.id) {
+        out.set(n.id, {
+          image: n.featuredImage?.url ?? null,
+          handle: n.handle || null,
+        });
+      }
     }
   }
   return out;
@@ -411,6 +438,7 @@ query VariantCosts($ids: [ID!]!) {
     ... on ProductVariant {
       id
       inventoryItem { id unitCost { amount } }
+      product { id handle featuredImage { url } }
     }
   }
 }`;
@@ -420,13 +448,19 @@ export interface ShopifyVariantCost {
   unitCost: number;
 }
 
+export interface ShopifyVariantDetails extends ShopifyVariantCost {
+  productId: string | null;
+  productImage: string | null;
+  productHandle: string | null;
+}
+
 /** Fetch Cost per item for the exact variants used by order lines. Product-level
  * fallback can choose the wrong size/color; this mapping deliberately cannot. */
 export async function fetchVariantCosts(
   creds: ShopifyCreds,
   variantGids: string[]
-): Promise<Map<string, ShopifyVariantCost>> {
-  const out = new Map<string, ShopifyVariantCost>();
+): Promise<Map<string, ShopifyVariantDetails>> {
+  const out = new Map<string, ShopifyVariantDetails>();
   const uniqueIds = [...new Set(variantGids.filter(Boolean))];
   if (uniqueIds.length === 0) return out;
   const c = await resolveCreds(creds);
@@ -440,6 +474,11 @@ export async function fetchVariantCosts(
               id: string;
               unitCost: { amount: string } | null;
             } | null;
+            product: {
+              id: string;
+              handle: string;
+              featuredImage: { url: string } | null;
+            } | null;
           }
         | null
       )[];
@@ -449,6 +488,9 @@ export async function fetchVariantCosts(
       out.set(node.id, {
         inventoryItemId: node.inventoryItem?.id ?? null,
         unitCost: num(node.inventoryItem?.unitCost?.amount),
+        productId: node.product?.id ?? null,
+        productImage: node.product?.featuredImage?.url ?? null,
+        productHandle: node.product?.handle ?? null,
       });
     }
   }
@@ -1092,6 +1134,7 @@ export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm 
       inventoryItemId: null,
       title: li.title,
       image: null, // webhook payload has no product image; a later sync fills it
+      handle: null, // enriched from the exact variant lookup before ingestion
       quantity: li.quantity,
       price,
       unitCost: 0, // REST webhook has no cost; a later GraphQL sync fills it

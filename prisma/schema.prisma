@@ -283,6 +283,7 @@ model Product {
   externalId     String?  // Shopify product/variant id
   title      String
   image      String?
+  handle     String?  // Shopify storefront slug used for the direct product link
   catalog    String?  // main collection/catalog title (for "đến từ catalog nào")
   baseCost   Float    @default(0) // COGS per unit (overrides COGS CostRule when set)
   active     Boolean  @default(true)

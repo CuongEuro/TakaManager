@@ -29,6 +29,7 @@ interface ProductRow {
   productId: string | null;
   title: string;
   image: string | null;
+  storefrontUrl: string | null;
   orders: number;
   units: number;
   revenue: number;
@@ -52,6 +53,17 @@ interface TopProductsResponse {
   page: number;
   pageSize: number;
   rows: ProductRow[];
+}
+
+interface ProductMediaPageResponse {
+  ok: boolean;
+  scanned: number;
+  updated: number;
+  total: number | null;
+  nextCursor: string | null;
+  hasNext: boolean;
+  errors: string[];
+  error?: string;
 }
 
 function parseYMD(v: string | null): Date | null {
@@ -96,6 +108,9 @@ function ProductsInner() {
   const [pageSize, setPageSize] = useState(20);
   const [data, setData] = useState<TopProductsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshingMedia, setRefreshingMedia] = useState(false);
+  const [mediaMessage, setMediaMessage] = useState<string | null>(null);
+  const [mediaVersion, setMediaVersion] = useState(0);
 
   useEffect(() => {
     const id = setTimeout(() => setQDebounced(q), 400);
@@ -126,7 +141,67 @@ function ProductsInner() {
     return () => {
       active = false;
     };
-  }, [range, storeId, qDebounced, sort, page, pageSize]);
+  }, [range, storeId, qDebounced, sort, page, pageSize, mediaVersion]);
+
+  async function refreshProductMedia() {
+    setRefreshingMedia(true);
+    setMediaMessage("Đang nạp lại ảnh và link từ Shopify…");
+    let scanned = 0;
+    let updated = 0;
+    const errors = new Set<string>();
+    const targetStoreIds = storeId
+      ? [storeId]
+      : data?.storeOptions.map((store) => store.id) ?? [];
+    try {
+      if (targetStoreIds.length === 0) throw new Error("Không có store để cập nhật");
+      // Each request handles at most 100 products, preventing gateway timeouts.
+      for (const targetStoreId of targetStoreIds) {
+        let cursor: string | null = null;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const response = await fetch("/api/products/media", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              storeId: targetStoreId,
+              ...(cursor ? { cursor } : {}),
+            }),
+          });
+          const result = (await response
+            .json()
+            .catch(() => ({}))) as ProductMediaPageResponse;
+          if (!response.ok || !result.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+          }
+          scanned += result.scanned;
+          updated += result.updated;
+          result.errors.forEach((error) => errors.add(error));
+          setMediaMessage(
+            `Đang nạp lại ảnh và link… đã quét ${formatNumber(scanned)} sản phẩm`
+          );
+          if (!result.hasNext) break;
+          if (!result.nextCursor) throw new Error("Thiếu con trỏ trang tiếp theo");
+          cursor = result.nextCursor;
+        }
+      }
+      setMediaMessage(
+        errors.size > 0
+          ? `⚠ Đã cập nhật ${formatNumber(updated)} sản phẩm. ${Array.from(
+              errors
+            ).join(" · ")}`
+          : `✓ Đã nạp lại ảnh và link cho ${formatNumber(updated)} sản phẩm.`
+      );
+      setMediaVersion((version) => version + 1);
+    } catch (error) {
+      setMediaMessage(
+        `⚠ Không thể nạp lại ảnh: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      setRefreshingMedia(false);
+    }
+  }
 
   const s = data?.summary;
   const storeName =
@@ -187,10 +262,32 @@ function ProductsInner() {
               ))}
             </Select>
           </div>
+          <Button
+            variant="secondary"
+            onClick={refreshProductMedia}
+            disabled={refreshingMedia}
+            title="Lấy lại featured image và link sản phẩm từ Shopify theo từng batch"
+          >
+            {refreshingMedia ? "Đang nạp ảnh…" : "🔄 Nạp lại ảnh"}
+          </Button>
           {loading && (
             <span className="text-xs text-slate-400">Đang tải…</span>
           )}
         </div>
+
+        {mediaMessage && (
+          <div
+            className={`mb-3 rounded-lg px-3 py-2 text-xs ${
+              mediaMessage.startsWith("⚠")
+                ? "bg-amber-50 text-amber-800"
+                : mediaMessage.startsWith("✓")
+                ? "bg-emerald-50 text-emerald-700"
+                : "bg-brand-50 text-brand-700"
+            }`}
+          >
+            {mediaMessage}
+          </div>
+        )}
 
         {data && data.rows.length === 0 ? (
           <EmptyState message="Không có sản phẩm nào trong khoảng thời gian / bộ lọc này." />
@@ -219,13 +316,32 @@ function ProductsInner() {
                     </Td>
                     <Td>
                       <div className="flex min-w-[220px] items-center gap-3">
-                        <ProductThumbnail
-                          src={p.image}
-                          alt={p.title}
-                        />
-                        <span className="line-clamp-2 text-sm font-medium text-slate-700">
-                          {p.title}
-                        </span>
+                        {p.storefrontUrl ? (
+                          <a
+                            href={p.storefrontUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Mở sản phẩm trên store"
+                          >
+                            <ProductThumbnail src={p.image} alt={p.title} />
+                          </a>
+                        ) : (
+                          <ProductThumbnail src={p.image} alt={p.title} />
+                        )}
+                        {p.storefrontUrl ? (
+                          <a
+                            href={p.storefrontUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="line-clamp-2 text-sm font-medium text-brand-700 hover:underline"
+                          >
+                            {p.title} ↗
+                          </a>
+                        ) : (
+                          <span className="line-clamp-2 text-sm font-medium text-slate-700">
+                            {p.title}
+                          </span>
+                        )}
                       </div>
                     </Td>
                     <Td className="text-right">{formatNumber(p.orders)}</Td>

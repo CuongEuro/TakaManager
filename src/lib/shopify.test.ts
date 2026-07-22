@@ -4,12 +4,14 @@ import {
   fetchProductCosts,
   fetchOrderLinesForCosts,
   fetchOrdersPage,
+  fetchProductMedia,
   fetchVariantCosts,
   firstPositiveUnitCost,
   normalizeInventoryCostWebhook,
   normalizeWebhookOrder,
   preserveUnitCostSnapshot,
   resolveCatalogVariantCost,
+  shopifyProductUrl,
 } from "./shopify";
 
 test("preserves a positive historical cost during later order syncs", () => {
@@ -130,6 +132,7 @@ test("manual order sync uses a bounded page without inventory cost", { concurren
     const body = JSON.parse(String(init?.body)) as { query: string };
     assert.match(body.query, /orders\(first: 10/);
     assert.doesNotMatch(body.query, /unitCost/);
+    assert.match(body.query, /\bhandle\b/);
     return new Response(
       JSON.stringify({
         data: {
@@ -180,6 +183,7 @@ test("order webhook keeps exact Shopify line and variant IDs", () => {
   assert.equal(order.lineItems[0].externalVariantId, "gid://shopify/ProductVariant/303");
   assert.equal(order.lineItems[1].externalProductId, null);
   assert.equal(order.lineItems[1].externalVariantId, null);
+  assert.equal(order.lineItems[0].handle, null);
 });
 
 test("normalizes an inventory cost webhook", () => {
@@ -205,6 +209,11 @@ test("fetches cost for the exact variant ID", { concurrency: false }, async () =
                 id: "gid://shopify/InventoryItem/456",
                 unitCost: { amount: "725.5" },
               },
+              product: {
+                id: "gid://shopify/Product/202",
+                handle: "cat-shirt",
+                featuredImage: { url: "https://cdn.shopify.com/cat.jpg" },
+              },
             },
           ],
         },
@@ -221,7 +230,55 @@ test("fetches cost for the exact variant ID", { concurrency: false }, async () =
     assert.deepEqual(costs.get(variantId), {
       inventoryItemId: "gid://shopify/InventoryItem/456",
       unitCost: 725.5,
+      productId: "gid://shopify/Product/202",
+      productImage: "https://cdn.shopify.com/cat.jpg",
+      productHandle: "cat-shirt",
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetches product image and storefront handle together", { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const productId = "gid://shopify/Product/202";
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      query: string;
+      variables: { ids: string[] };
+    };
+    assert.match(body.query, /featuredImage/);
+    assert.match(body.query, /\bhandle\b/);
+    assert.deepEqual(body.variables.ids, [productId]);
+    return new Response(
+      JSON.stringify({
+        data: {
+          nodes: [
+            {
+              id: productId,
+              handle: "cat-shirt",
+              featuredImage: { url: "https://cdn.shopify.com/cat.jpg" },
+            },
+          ],
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const media = await fetchProductMedia(
+      { shopifyDomain: "example.myshopify.com", shopifyToken: "test-token" },
+      [productId]
+    );
+    assert.deepEqual(media.get(productId), {
+      image: "https://cdn.shopify.com/cat.jpg",
+      handle: "cat-shirt",
+    });
+    assert.equal(
+      shopifyProductUrl("https://example.myshopify.com/", "cat-shirt"),
+      "https://example.myshopify.com/products/cat-shirt"
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
