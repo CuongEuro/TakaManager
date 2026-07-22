@@ -39,6 +39,13 @@ test("resolves a recreated variant by SKU or exact historical title", () => {
         sku: "CAT-S-G",
         unitCost: 462,
       },
+      {
+        externalVariantId: "gid://shopify/ProductVariant/3",
+        inventoryItemId: "gid://shopify/InventoryItem/3",
+        title: "綿（コットン） / M / グレー",
+        sku: null,
+        unitCost: 462,
+      },
     ],
   };
 
@@ -55,6 +62,13 @@ test("resolves a recreated variant by SKU or exact historical title", () => {
       catalog
     )?.unitCost,
     436
+  );
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "コットン（綿） / M / グレー" },
+      catalog
+    )?.externalVariantId,
+    "gid://shopify/ProductVariant/3"
   );
 });
 

@@ -675,7 +675,12 @@ function normalizedVariantTitle(value: string | null | undefined): string {
   return normalizedLookup(value)
     .replace(/[／｜|]/g, "/")
     .split("/")
-    .map((part) => part.trim())
+    .map((part) => {
+      const trimmed = part.trim();
+      const bilingualPair = trimmed.match(/^([^()]+)\(([^()]+)\)$/);
+      if (!bilingualPair) return trimmed;
+      return [bilingualPair[1].trim(), bilingualPair[2].trim()].sort().join("=");
+    })
     .filter(Boolean)
     .join("/");
 }
