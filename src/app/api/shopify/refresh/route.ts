@@ -28,6 +28,8 @@ export async function POST(req: NextRequest) {
     typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
   const fromYMD = isYMD(b.from) ? b.from : undefined;
   const toYMD = isYMD(b.to) ? b.to : undefined;
+  const requestedStoreId =
+    typeof b.storeId === "string" && b.storeId ? b.storeId : undefined;
 
   const stores = await prisma.store.findMany({
     where: { organizationId: session.oid, active: true },
@@ -42,7 +44,9 @@ export async function POST(req: NextRequest) {
   });
   const connected = stores.filter(
     (s) =>
-      s.shopifyDomain && (s.shopifyToken || (s.shopifyClientId && s.shopifyClientSecret))
+      (!requestedStoreId || s.id === requestedStoreId) &&
+      s.shopifyDomain &&
+      (s.shopifyToken || (s.shopifyClientId && s.shopifyClientSecret))
   );
 
   // Per-store rate limits are independent → refresh stores in parallel to fit
@@ -89,6 +93,17 @@ export async function POST(req: NextRequest) {
     stores: connected.length,
     refundsUpdated,
     costsUpdated,
+    costBatches: results.flatMap(({ costs }) =>
+      costs
+        ? [
+            {
+              storeId: costs.storeId,
+              hasNext: costs.hasNext,
+              nextCursor: costs.nextCursor,
+            },
+          ]
+        : []
+    ),
     missingCount,
     missingProducts,
     missingTruncated,

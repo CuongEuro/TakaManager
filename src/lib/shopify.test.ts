@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   fetchProductCosts,
+  fetchProductVariantCatalogs,
   fetchOrderLinesForCosts,
   fetchOrdersPage,
   fetchProductMedia,
@@ -50,11 +51,75 @@ test("resolves a recreated variant by SKU or exact historical title", () => {
   );
   assert.equal(
     resolveCatalogVariantCost(
-      { sku: null, variantTitle: "  Cotton / S / White  " },
+      { sku: null, variantTitle: "  Cotton／S／White  " },
       catalog
     )?.unitCost,
     436
   );
+});
+
+test("loads variants beyond Shopify's first catalog page for legacy orders", { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const productId = "gid://shopify/Product/202";
+  const cursors: unknown[] = [];
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      variables: { cursor?: string };
+    };
+    cursors.push(body.variables.cursor ?? null);
+    const firstPage = body.variables.cursor == null;
+    const variants = firstPage
+      ? {
+          pageInfo: { hasNextPage: true, endCursor: "variant-page-1" },
+          nodes: [
+            {
+              id: "gid://shopify/ProductVariant/1",
+              title: "Cotton / S / White",
+              sku: null,
+              inventoryItem: { id: "gid://shopify/InventoryItem/1", unitCost: { amount: "436" } },
+            },
+          ],
+        }
+      : {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            {
+              id: "gid://shopify/ProductVariant/251",
+              title: "コットン（綿） / 2XL / ホワイト",
+              sku: null,
+              inventoryItem: { id: "gid://shopify/InventoryItem/251", unitCost: { amount: "545" } },
+            },
+          ],
+        };
+    const data = firstPage
+      ? { nodes: [{ id: productId, title: "Cat shirt", variants }] }
+      : { node: { id: productId, title: "Cat shirt", variants } };
+
+    return new Response(JSON.stringify({ data }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const catalogs = await fetchProductVariantCatalogs(
+      { shopifyDomain: "example.myshopify.com", shopifyToken: "test-token" },
+      [{ externalProductId: productId, title: "Cat shirt" }]
+    );
+    const catalog = catalogs.get(`id:${productId}`);
+    assert.equal(catalog?.variants.length, 2);
+    assert.equal(
+      resolveCatalogVariantCost(
+        { sku: null, variantTitle: "コットン(綿)／2XL／ホワイト" },
+        catalog
+      )?.unitCost,
+      545
+    );
+    assert.deepEqual(cursors, [null, "variant-page-1"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("does not guess a cost when historical variant cannot be identified", () => {

@@ -163,6 +163,7 @@ export default function DashboardPage() {
               ? {
                   from: calendarYMD(range.from),
                   to: calendarYMD(range.to),
+                  ...(storeId ? { storeId } : {}),
                 }
               : {}
           ),
@@ -174,7 +175,58 @@ export default function DashboardPage() {
         }
         if (force) {
           const errors = Array.isArray(r.errors) ? (r.errors as string[]) : [];
-          const missingCount = Number(r.missingCount) || 0;
+          let costsUpdated = Number(r.costsUpdated) || 0;
+          let missingCount = Number(r.missingCount) || 0;
+          const costBatches = Array.isArray(r.costBatches)
+            ? (r.costBatches as {
+                storeId?: unknown;
+                hasNext?: unknown;
+                nextCursor?: unknown;
+              }[])
+            : [];
+
+          // The first refresh handles refunds and one small Basecost batch.
+          // Continue remaining batches from the browser so each request stays
+          // comfortably below the serverless timeout for large stores.
+          for (const batch of costBatches) {
+            if (!batch.hasNext) continue;
+            if (
+              typeof batch.storeId !== "string" ||
+              typeof batch.nextCursor !== "string" ||
+              !batch.nextCursor
+            ) {
+              errors.push("Thiếu con trỏ để tiếp tục cập nhật Basecost.");
+              continue;
+            }
+            let cursor = batch.nextCursor;
+            for (let page = 0; page < 500; page++) {
+              const next = await fetch("/api/shopify/costs", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  storeId: batch.storeId,
+                  from: calendarYMD(range.from),
+                  to: calendarYMD(range.to),
+                  cursor,
+                  limit: 10,
+                }),
+              }).then(safeJson);
+              if (!next.ok) {
+                errors.push(String(next.error || "Không thể cập nhật Basecost."));
+                break;
+              }
+              costsUpdated += Number(next.updated) || 0;
+              if (!next.hasNext) {
+                missingCount += Number(next.missingCount) || 0;
+                break;
+              }
+              if (typeof next.nextCursor !== "string" || !next.nextCursor) {
+                errors.push("Thiếu con trỏ để tiếp tục cập nhật Basecost.");
+                break;
+              }
+              cursor = next.nextCursor;
+            }
+          }
           setRefreshMsg(
             r.error
               ? `⚠ Cập nhật Basecost lỗi: ${r.error}`
@@ -182,7 +234,7 @@ export default function DashboardPage() {
               ? `⚠ ${errors.join(" · ")}`
               : missingCount > 0
               ? `⚠ Đã cập nhật Basecost, còn ${missingCount} sản phẩm chưa có Cost per item.`
-              : `✓ Đã cập nhật ${r.costsUpdated ?? 0} dòng giá vốn, ${
+              : `✓ Đã cập nhật ${costsUpdated} dòng giá vốn, ${
                   r.refundsUpdated ?? 0
                 } hoàn tiền (${r.stores ?? 0} store).`
           );
@@ -198,7 +250,7 @@ export default function DashboardPage() {
         if (force) setRefreshingCosts(false);
       }
     },
-    [loadDashboard, range]
+    [loadDashboard, range, storeId]
   );
   useAutoRefresh("taka:shopify-last-refresh", doShopifyRefresh);
 

@@ -616,6 +616,7 @@ query ProductVariantCatalog($ids: [ID!]!) {
       id
       title
       variants(first: 250) {
+        pageInfo { hasNextPage endCursor }
         nodes { id title sku inventoryItem { id unitCost { amount } } }
       }
     }
@@ -629,6 +630,21 @@ query ProductVariantCatalogByTitle($query: String!) {
       id
       title
       variants(first: 250) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id title sku inventoryItem { id unitCost { amount } } }
+      }
+    }
+  }
+}`;
+
+const PRODUCT_VARIANT_CATALOG_PAGE_QUERY = `
+query ProductVariantCatalogPage($id: ID!, $cursor: String!) {
+  node(id: $id) {
+    ... on Product {
+      id
+      title
+      variants(first: 250, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
         nodes { id title sku inventoryItem { id unitCost { amount } } }
       }
     }
@@ -648,7 +664,20 @@ export interface ShopifyProductVariantCatalog {
 }
 
 function normalizedLookup(value: string | null | undefined): string {
-  return (value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  return (value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase();
+}
+
+function normalizedVariantTitle(value: string | null | undefined): string {
+  return normalizedLookup(value)
+    .replace(/[／｜|]/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("/");
 }
 
 function titleCatalogKey(title: string): string {
@@ -663,6 +692,7 @@ type ProductVariantCatalogNode = {
   id: string;
   title: string;
   variants: {
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
     nodes: {
       id: string;
       title: string;
@@ -674,6 +704,26 @@ type ProductVariantCatalogNode = {
     }[];
   };
 };
+
+async function loadCompleteCatalog(
+  creds: Awaited<ReturnType<typeof resolveCreds>>,
+  initialNode: ProductVariantCatalogNode
+): Promise<ShopifyProductVariantCatalog> {
+  const catalog = normalizeCatalog(initialNode);
+  let pageInfo = initialNode.variants.pageInfo;
+  while (pageInfo.hasNextPage && pageInfo.endCursor) {
+    const data = await shopifyGraphQL<{
+      node: ProductVariantCatalogNode | null;
+    }>(creds, PRODUCT_VARIANT_CATALOG_PAGE_QUERY, {
+      id: initialNode.id,
+      cursor: pageInfo.endCursor,
+    });
+    if (!data.node) break;
+    catalog.variants.push(...normalizeCatalog(data.node).variants);
+    pageInfo = data.node.variants.pageInfo;
+  }
+  return catalog;
+}
 
 function normalizeCatalog(node: ProductVariantCatalogNode): ShopifyProductVariantCatalog {
   return {
@@ -711,7 +761,7 @@ export async function fetchProductVariantCatalogs(
     }>(c, PRODUCT_VARIANT_CATALOG_QUERY, { ids: ids.slice(i, i + 3) });
     for (const node of data.nodes) {
       if (!node) continue;
-      const catalog = normalizeCatalog(node);
+      const catalog = await loadCompleteCatalog(c, node);
       out.set(idCatalogKey(catalog.externalProductId), catalog);
       out.set(titleCatalogKey(catalog.title), catalog);
     }
@@ -742,7 +792,7 @@ export async function fetchProductVariantCatalogs(
         const exact = data.products.nodes.filter(
           (node) => normalizedLookup(node.title) === normalizedLookup(title)
         );
-        return exact.length === 1 ? normalizeCatalog(exact[0]) : null;
+        return exact.length === 1 ? loadCompleteCatalog(c, exact[0]) : null;
       })
     );
     for (const catalog of results) {
@@ -768,10 +818,11 @@ export function resolveCatalogVariantCost(
     );
     if (matches.length === 1) return matches[0];
   }
-  const title = normalizedLookup(line.variantTitle);
+  const title = normalizedVariantTitle(line.variantTitle);
   if (!title) return null;
   const matches = catalog.variants.filter(
-    (variant) => normalizedLookup(variant.title) === title && variant.unitCost > 0
+    (variant) =>
+      normalizedVariantTitle(variant.title) === title && variant.unitCost > 0
   );
   return matches.length === 1 ? matches[0] : null;
 }
