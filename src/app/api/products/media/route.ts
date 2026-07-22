@@ -13,10 +13,22 @@ export async function POST(req: NextRequest) {
   if (!body.storeId) {
     return NextResponse.json({ error: "storeId required" }, { status: 400 });
   }
+  const productIds = Array.isArray(body.productIds)
+    ? body.productIds.filter(
+        (id: unknown): id is string => typeof id === "string" && !!id
+      )
+    : undefined;
+  if (productIds && productIds.length > 100) {
+    return NextResponse.json(
+      { error: "Tối đa 100 sản phẩm mỗi lượt" },
+      { status: 400 }
+    );
+  }
   try {
     const result = await refreshProductMediaPage(session.oid, {
       storeId: String(body.storeId),
       cursor: body.cursor ? String(body.cursor) : null,
+      productIds,
     });
     return NextResponse.json(result);
   } catch (error) {

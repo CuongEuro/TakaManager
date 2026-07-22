@@ -279,7 +279,12 @@ export interface ProductMediaPageResult {
  * loops this endpoint, so large catalogs cannot exhaust a serverless request. */
 export async function refreshProductMediaPage(
   organizationId: string,
-  opts: { storeId: string; cursor?: string | null; limit?: number }
+  opts: {
+    storeId: string;
+    cursor?: string | null;
+    limit?: number;
+    productIds?: string[];
+  }
 ): Promise<ProductMediaPageResult> {
   const { store, creds } = await storeCreds(opts.storeId, organizationId);
   if (!creds) {
@@ -295,12 +300,33 @@ export async function refreshProductMediaPage(
   }
 
   const limit = Math.min(100, Math.max(10, opts.limit ?? 100));
+  const selectedProductIds = opts.productIds
+    ? [...new Set(opts.productIds.filter(Boolean))]
+    : null;
+  if (selectedProductIds && selectedProductIds.length === 0) {
+    return {
+      ok: true,
+      scanned: 0,
+      updated: 0,
+      total: 0,
+      nextCursor: null,
+      hasNext: false,
+      errors: [],
+    };
+  }
   const where = {
     organizationId,
     storeId: opts.storeId,
     active: true,
     externalId: { not: null as string | null },
-    ...(opts.cursor ? { id: { gt: opts.cursor } } : {}),
+    ...(selectedProductIds || opts.cursor
+      ? {
+          id: {
+            ...(selectedProductIds ? { in: selectedProductIds } : {}),
+            ...(opts.cursor ? { gt: opts.cursor } : {}),
+          },
+        }
+      : {}),
   };
   const [rows, total] = await Promise.all([
     prisma.product.findMany({
@@ -317,6 +343,7 @@ export async function refreshProductMediaPage(
             storeId: opts.storeId,
             active: true,
             externalId: { not: null },
+            ...(selectedProductIds ? { id: { in: selectedProductIds } } : {}),
           },
         }),
   ]);
@@ -705,14 +732,22 @@ export interface MissingBasecostReport {
  * Shopify cost fetch completed successfully for other products. */
 export async function findMissingBasecosts(
   organizationId: string,
-  opts: { start: Date; end: Date; storeId?: string; limit?: number }
+  opts: {
+    start: Date;
+    end: Date;
+    storeId?: string;
+    limit?: number;
+    productIds?: string[];
+  }
 ): Promise<MissingBasecostReport> {
   const where = {
     unitCost: { lte: 0 },
     // Tips, donations and other custom order charges are not Shopify products,
     // cannot carry inventory Cost per item, and must not be reported as missing
     // product Basecost.
-    productId: { not: null },
+    productId: opts.productIds?.length
+      ? { in: opts.productIds }
+      : { not: null },
     order: {
       organizationId,
       date: { gte: opts.start, lt: opts.end },
@@ -779,6 +814,7 @@ export async function syncStoreCosts(
     toYMD?: string;
     cursor?: string;
     limit?: number;
+    productIds?: string[];
   } = {}
 ): Promise<CostSyncResult> {
   const { store, creds } = await storeCreds(storeId, organizationId);
@@ -814,6 +850,12 @@ export async function syncStoreCosts(
   }
   const dateWindow = { gte: winStart, lt: winEnd };
   const batchLimit = Math.max(1, Math.min(opts.limit ?? 10, 20));
+  const selectedProductIds = opts.productIds
+    ? [...new Set(opts.productIds.filter(Boolean))]
+    : null;
+  if (selectedProductIds && selectedProductIds.length === 0) {
+    return { ...base, ok: true };
+  }
 
   try {
     // Read only rows that are genuinely missing Basecost.
@@ -821,7 +863,9 @@ export async function syncStoreCosts(
       where: {
         ...(opts.cursor ? { id: { gt: opts.cursor } } : {}),
         unitCost: { lte: 0 },
-        productId: { not: null },
+        productId: selectedProductIds
+          ? { in: selectedProductIds }
+          : { not: null },
         order: { storeId, date: dateWindow },
       },
       select: {
@@ -841,7 +885,7 @@ export async function syncStoreCosts(
     const hasNext = rows.length > batchLimit;
     const missingLines = rows.slice(0, batchLimit);
     const nextCursor = hasNext ? missingLines[missingLines.length - 1]?.id ?? null : null;
-    const productIds = new Set(
+    const batchProductIds = new Set(
       missingLines.map((line) => line.productId).filter((id): id is string => !!id)
     );
     // Nothing missing in the selected window.
@@ -850,6 +894,7 @@ export async function syncStoreCosts(
         start: winStart,
         end: winEnd,
         storeId,
+        productIds: selectedProductIds ?? undefined,
       });
       return {
         ...base,
@@ -874,6 +919,9 @@ export async function syncStoreCosts(
         where: {
           externalVariantId: variantId,
           unitCost: { lte: 0 },
+          ...(selectedProductIds
+            ? { productId: { in: selectedProductIds } }
+            : {}),
           order: { storeId, date: dateWindow },
         },
         data: {
@@ -996,11 +1044,12 @@ export async function syncStoreCosts(
           start: winStart,
           end: winEnd,
           storeId,
+          productIds: selectedProductIds ?? undefined,
         });
     return {
       ...base,
       ok: true,
-      products: productIds.size,
+      products: batchProductIds.size,
       withCost: resolvedProducts.size,
       updated,
       missingCount: missing.total,

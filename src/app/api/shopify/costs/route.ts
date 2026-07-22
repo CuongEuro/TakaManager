@@ -19,6 +19,17 @@ export async function POST(req: NextRequest) {
   // timezone server-side, so the patched window matches the dashboard's days.
   const isYMD = (v: unknown): v is string =>
     typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const productIds = Array.isArray(b.productIds)
+    ? b.productIds.filter(
+        (id: unknown): id is string => typeof id === "string" && !!id
+      )
+    : undefined;
+  if (productIds && productIds.length > 100) {
+    return NextResponse.json(
+      { error: "Tối đa 100 sản phẩm mỗi lượt" },
+      { status: 400 }
+    );
+  }
 
   const result = await syncStoreCosts(String(b.storeId), session.oid, {
     fromYMD: isYMD(b.from) ? b.from : undefined,
@@ -28,6 +39,7 @@ export async function POST(req: NextRequest) {
     until: b.until ? new Date(String(b.until)) : undefined,
     cursor: typeof b.cursor === "string" ? b.cursor : undefined,
     limit: b.limit ? Number(b.limit) : undefined,
+    productIds,
   });
 
   return NextResponse.json(result);

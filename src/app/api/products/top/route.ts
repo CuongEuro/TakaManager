@@ -18,9 +18,11 @@ export const dynamic = "force-dynamic";
 
 type Agg = {
   productId: string | null;
+  storeId: string;
   title: string;
   image: string | null;
   storefrontUrl: string | null;
+  missingBasecost: boolean;
   orders: number;
   units: number;
   revenue: number;
@@ -39,7 +41,8 @@ export async function GET(req: NextRequest) {
   const isYMD = (v: string | null): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const storeId = sp.get("storeId") || undefined;
   const q = (sp.get("q") ?? "").trim().toLowerCase();
-  const sort = sp.get("sort") ?? "revenue"; // revenue | units | orders | profit
+  const sort = sp.get("sort") ?? "revenue"; // revenue | units | orders | cogs | profit
+  const basecost = sp.get("basecost") ?? "all"; // all | missing | complete
   const page = Math.max(1, Number(sp.get("page")) || 1);
   const pageSize = Math.min(100, Math.max(5, Number(sp.get("pageSize")) || 20));
 
@@ -119,6 +122,9 @@ export async function GET(req: NextRequest) {
       const lineVal = li.price * li.quantity;
 
       let cogs = 0;
+      // Custom charges such as Tip have no Product row and never need Basecost.
+      const missingBasecost =
+        useShopifyCost && !!li.productId && li.unitCost <= 0;
       if (useShopifyCost) {
         cogs = li.unitCost * li.quantity;
       } else if (hasOrderLevelCogs) {
@@ -146,9 +152,11 @@ export async function GET(req: NextRequest) {
         map.get(key) ??
         ({
           productId: li.productId,
+          storeId: o.storeId,
           title: li.title,
           image: img,
           storefrontUrl,
+          missingBasecost,
           orders: 0,
           units: 0,
           revenue: 0,
@@ -160,6 +168,7 @@ export async function GET(req: NextRequest) {
       cur.cogs += cogs;
       if (!cur.image && img) cur.image = img;
       if (!cur.storefrontUrl && storefrontUrl) cur.storefrontUrl = storefrontUrl;
+      if (missingBasecost) cur.missingBasecost = true;
       // Count each order once per product (an order may repeat a product on
       // several lines — variants).
       if (!seenThisOrder.has(key)) {
@@ -173,6 +182,8 @@ export async function GET(req: NextRequest) {
 
   let rows = Array.from(map.values());
   if (q) rows = rows.filter((r) => r.title.toLowerCase().includes(q));
+  if (basecost === "missing") rows = rows.filter((r) => r.missingBasecost);
+  if (basecost === "complete") rows = rows.filter((r) => !r.missingBasecost);
 
   const summary = {
     products: rows.length,
@@ -187,6 +198,8 @@ export async function GET(req: NextRequest) {
       ? r.units
       : sort === "orders"
       ? r.orders
+      : sort === "cogs"
+      ? r.cogs
       : sort === "profit"
       ? r.revenue - r.cogs
       : r.revenue;
@@ -199,9 +212,11 @@ export async function GET(req: NextRequest) {
     .slice((safePage - 1) * pageSize, safePage * pageSize)
     .map((r) => ({
       productId: r.productId,
+      storeId: r.storeId,
       title: r.title,
       image: r.image,
       storefrontUrl: r.storefrontUrl,
+      missingBasecost: r.missingBasecost,
       orders: r.orders,
       units: r.units,
       revenue: r.revenue,

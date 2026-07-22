@@ -27,9 +27,11 @@ import {
 
 interface ProductRow {
   productId: string | null;
+  storeId: string;
   title: string;
   image: string | null;
   storefrontUrl: string | null;
+  missingBasecost: boolean;
   orders: number;
   units: number;
   revenue: number;
@@ -66,6 +68,15 @@ interface ProductMediaPageResponse {
   error?: string;
 }
 
+interface CostSyncResponse {
+  ok: boolean;
+  updated: number;
+  missingCount: number;
+  nextCursor: string | null;
+  hasNext: boolean;
+  error?: string;
+}
+
 function parseYMD(v: string | null): Date | null {
   return v ? parseCalendarDate(v) : null;
 }
@@ -74,6 +85,7 @@ const SORT_OPTIONS = [
   { value: "revenue", label: "Doanh thu" },
   { value: "units", label: "Số items" },
   { value: "orders", label: "Số đơn" },
+  { value: "cogs", label: "Basecost" },
   { value: "profit", label: "LN gộp" },
 ];
 
@@ -104,12 +116,17 @@ function ProductsInner() {
   const [q, setQ] = useState("");
   const [qDebounced, setQDebounced] = useState("");
   const [sort, setSort] = useState("revenue");
+  const [basecostFilter, setBasecostFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [data, setData] = useState<TopProductsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingMedia, setRefreshingMedia] = useState(false);
-  const [mediaMessage, setMediaMessage] = useState<string | null>(null);
+  const [refreshingCosts, setRefreshingCosts] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(
+    new Set()
+  );
   const [mediaVersion, setMediaVersion] = useState(0);
 
   useEffect(() => {
@@ -120,7 +137,13 @@ function ProductsInner() {
   // Any filter change restarts from page 1.
   useEffect(() => {
     setPage(1);
-  }, [range, storeId, qDebounced, sort, pageSize]);
+  }, [range, storeId, qDebounced, sort, basecostFilter, pageSize]);
+
+  // Selection deliberately belongs to the visible page so bulk actions stay
+  // explicit and never affect products the user can no longer see.
+  useEffect(() => {
+    setSelectedProductIds(new Set());
+  }, [range, storeId, qDebounced, sort, basecostFilter, pageSize, page]);
 
   useEffect(() => {
     let active = true;
@@ -131,6 +154,7 @@ function ProductsInner() {
       page: String(page),
       pageSize: String(pageSize),
       sort,
+      basecost: basecostFilter,
     });
     if (storeId) params.set("storeId", storeId);
     if (qDebounced.trim()) params.set("q", qDebounced.trim());
@@ -141,21 +165,49 @@ function ProductsInner() {
     return () => {
       active = false;
     };
-  }, [range, storeId, qDebounced, sort, page, pageSize, mediaVersion]);
+  }, [
+    range,
+    storeId,
+    qDebounced,
+    sort,
+    basecostFilter,
+    page,
+    pageSize,
+    mediaVersion,
+  ]);
 
-  async function refreshProductMedia() {
+  async function refreshProductMedia(selectedOnly: boolean) {
     setRefreshingMedia(true);
-    setMediaMessage("Đang nạp lại ảnh và link từ Shopify…");
+    setActionMessage("Đang nạp lại ảnh và link từ Shopify…");
     let scanned = 0;
     let updated = 0;
     const errors = new Set<string>();
-    const targetStoreIds = storeId
-      ? [storeId]
-      : data?.storeOptions.map((store) => store.id) ?? [];
+    const selectedRows =
+      data?.rows.filter(
+        (row) => row.productId && selectedProductIds.has(row.productId)
+      ) ?? [];
+    const targets = new Map<string, string[] | undefined>();
+    if (selectedOnly) {
+      for (const row of selectedRows) {
+        if (!row.productId) continue;
+        const ids = targets.get(row.storeId) ?? [];
+        ids.push(row.productId);
+        targets.set(row.storeId, ids);
+      }
+    } else {
+      const targetStoreIds = storeId
+        ? [storeId]
+        : data?.storeOptions.map((store) => store.id) ?? [];
+      targetStoreIds.forEach((id) => targets.set(id, undefined));
+    }
     try {
-      if (targetStoreIds.length === 0) throw new Error("Không có store để cập nhật");
+      if (targets.size === 0) {
+        throw new Error(
+          selectedOnly ? "Hãy tích chọn ít nhất một sản phẩm" : "Không có store để cập nhật"
+        );
+      }
       // Each request handles at most 100 products, preventing gateway timeouts.
-      for (const targetStoreId of targetStoreIds) {
+      for (const [targetStoreId, productIds] of targets) {
         let cursor: string | null = null;
         // eslint-disable-next-line no-constant-condition
         while (true) {
@@ -164,6 +216,7 @@ function ProductsInner() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               storeId: targetStoreId,
+              ...(productIds ? { productIds } : {}),
               ...(cursor ? { cursor } : {}),
             }),
           });
@@ -176,7 +229,7 @@ function ProductsInner() {
           scanned += result.scanned;
           updated += result.updated;
           result.errors.forEach((error) => errors.add(error));
-          setMediaMessage(
+          setActionMessage(
             `Đang nạp lại ảnh và link… đã quét ${formatNumber(scanned)} sản phẩm`
           );
           if (!result.hasNext) break;
@@ -184,7 +237,7 @@ function ProductsInner() {
           cursor = result.nextCursor;
         }
       }
-      setMediaMessage(
+      setActionMessage(
         errors.size > 0
           ? `⚠ Đã cập nhật ${formatNumber(updated)} sản phẩm. ${Array.from(
               errors
@@ -192,8 +245,9 @@ function ProductsInner() {
           : `✓ Đã nạp lại ảnh và link cho ${formatNumber(updated)} sản phẩm.`
       );
       setMediaVersion((version) => version + 1);
+      if (selectedOnly) setSelectedProductIds(new Set());
     } catch (error) {
-      setMediaMessage(
+      setActionMessage(
         `⚠ Không thể nạp lại ảnh: ${
           error instanceof Error ? error.message : String(error)
         }`
@@ -203,10 +257,112 @@ function ProductsInner() {
     }
   }
 
+  async function refreshSelectedBasecosts() {
+    const selectedRows =
+      data?.rows.filter(
+        (row) =>
+          row.productId &&
+          row.missingBasecost &&
+          selectedProductIds.has(row.productId)
+      ) ?? [];
+    const targets = new Map<string, string[]>();
+    for (const row of selectedRows) {
+      if (!row.productId) continue;
+      const ids = targets.get(row.storeId) ?? [];
+      ids.push(row.productId);
+      targets.set(row.storeId, ids);
+    }
+    if (targets.size === 0) {
+      setActionMessage("⚠ Hãy tích chọn sản phẩm đang thiếu Basecost.");
+      return;
+    }
+
+    setRefreshingCosts(true);
+    setActionMessage("Đang cập nhật Basecost cho các sản phẩm đã chọn…");
+    let updated = 0;
+    let missing = 0;
+    try {
+      for (const [targetStoreId, productIds] of targets) {
+        let cursor: string | null = null;
+        for (let batch = 0; batch < 500; batch++) {
+          const response = await fetch("/api/shopify/costs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              storeId: targetStoreId,
+              productIds,
+              from: calendarYMD(range.from),
+              to: calendarYMD(range.to),
+              cursor,
+              limit: 20,
+            }),
+          });
+          const result = (await response
+            .json()
+            .catch(() => ({}))) as CostSyncResponse;
+          if (!response.ok || !result.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+          }
+          updated += Number(result.updated) || 0;
+          if (!result.hasNext) {
+            missing += Number(result.missingCount) || 0;
+            break;
+          }
+          if (!result.nextCursor) throw new Error("Thiếu con trỏ batch tiếp theo");
+          cursor = result.nextCursor;
+        }
+      }
+      setActionMessage(
+        missing > 0
+          ? `⚠ Đã cập nhật ${formatNumber(updated)} dòng Basecost; còn ${formatNumber(
+              missing
+            )} sản phẩm đã chọn chưa có Cost per item trên Shopify.`
+          : `✓ Đã cập nhật ${formatNumber(updated)} dòng Basecost cho các sản phẩm đã chọn.`
+      );
+      setSelectedProductIds(new Set());
+      setMediaVersion((version) => version + 1);
+    } catch (error) {
+      setActionMessage(
+        `⚠ Không thể cập nhật Basecost: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      setRefreshingCosts(false);
+    }
+  }
+
   const s = data?.summary;
   const storeName =
     (storeId && data?.storeOptions.find((o) => o.id === storeId)?.name) ||
     "Tất cả store";
+  const selectableIds =
+    data?.rows.flatMap((row) => (row.productId ? [row.productId] : [])) ?? [];
+  const allVisibleSelected =
+    selectableIds.length > 0 &&
+    selectableIds.every((id) => selectedProductIds.has(id));
+  const selectedMissingCount =
+    data?.rows.filter(
+      (row) =>
+        row.productId &&
+        row.missingBasecost &&
+        selectedProductIds.has(row.productId)
+    ).length ?? 0;
+
+  function toggleVisibleProducts() {
+    setSelectedProductIds(
+      allVisibleSelected ? new Set() : new Set(selectableIds)
+    );
+  }
+
+  function toggleProduct(productId: string) {
+    setSelectedProductIds((current) => {
+      const next = new Set(current);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
+  }
 
   return (
     <div>
@@ -262,30 +418,76 @@ function ProductsInner() {
               ))}
             </Select>
           </div>
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            Basecost
+            <Select
+              value={basecostFilter}
+              onChange={(e) => setBasecostFilter(e.target.value)}
+              className="!w-auto"
+            >
+              <option value="all">Tất cả</option>
+              <option value="missing">Chưa đủ Basecost</option>
+              <option value="complete">Đã đủ Basecost</option>
+            </Select>
+          </div>
           <Button
             variant="secondary"
-            onClick={refreshProductMedia}
-            disabled={refreshingMedia}
+            onClick={() => refreshProductMedia(false)}
+            disabled={refreshingMedia || refreshingCosts}
             title="Lấy lại featured image và link sản phẩm từ Shopify theo từng batch"
           >
-            {refreshingMedia ? "Đang nạp ảnh…" : "🔄 Nạp lại ảnh"}
+            {refreshingMedia ? "Đang nạp ảnh…" : "🔄 Nạp toàn bộ ảnh"}
           </Button>
           {loading && (
             <span className="text-xs text-slate-400">Đang tải…</span>
           )}
         </div>
 
-        {mediaMessage && (
+        {selectedProductIds.size > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-brand-100 bg-brand-50 px-3 py-2">
+            <span className="mr-auto text-sm font-medium text-brand-800">
+              Đã chọn {formatNumber(selectedProductIds.size)} sản phẩm
+            </span>
+            <Button
+              variant="secondary"
+              onClick={refreshSelectedBasecosts}
+              disabled={
+                refreshingCosts || refreshingMedia || selectedMissingCount === 0
+              }
+              title="Chỉ cập nhật các dòng order còn thiếu Basecost của sản phẩm đã chọn"
+            >
+              {refreshingCosts
+                ? "Đang cập nhật Basecost…"
+                : `💰 Cập nhật Basecost (${selectedMissingCount})`}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => refreshProductMedia(true)}
+              disabled={refreshingCosts || refreshingMedia}
+            >
+              🖼 Cập nhật ảnh & link ({selectedProductIds.size})
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => setSelectedProductIds(new Set())}
+              disabled={refreshingCosts || refreshingMedia}
+            >
+              Bỏ chọn
+            </Button>
+          </div>
+        )}
+
+        {actionMessage && (
           <div
             className={`mb-3 rounded-lg px-3 py-2 text-xs ${
-              mediaMessage.startsWith("⚠")
+              actionMessage.startsWith("⚠")
                 ? "bg-amber-50 text-amber-800"
-                : mediaMessage.startsWith("✓")
+                : actionMessage.startsWith("✓")
                 ? "bg-emerald-50 text-emerald-700"
                 : "bg-brand-50 text-brand-700"
             }`}
           >
-            {mediaMessage}
+            {actionMessage}
           </div>
         )}
 
@@ -295,6 +497,16 @@ function ProductsInner() {
           <Table>
             <thead>
               <tr>
+                <Th className="w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleVisibleProducts}
+                    disabled={selectableIds.length === 0}
+                    aria-label="Chọn tất cả sản phẩm đang hiển thị"
+                    className="h-4 w-4 rounded border-slate-300 accent-brand-600"
+                  />
+                </Th>
                 <Th className="w-10 text-center">#</Th>
                 <Th>Sản phẩm</Th>
                 <Th className="text-right">Số đơn</Th>
@@ -310,7 +522,26 @@ function ProductsInner() {
                 const rank = (data.page - 1) * data.pageSize + i + 1;
                 const margin = p.revenue > 0 ? p.grossProfit / p.revenue : 0;
                 return (
-                  <tr key={p.productId ?? p.title} className="hover:bg-slate-50">
+                  <tr
+                    key={p.productId ?? p.title}
+                    className={
+                      p.productId && selectedProductIds.has(p.productId)
+                        ? "bg-brand-50/60 hover:bg-brand-50"
+                        : "hover:bg-slate-50"
+                    }
+                  >
+                    <Td className="text-center">
+                      <input
+                        type="checkbox"
+                        checked={
+                          !!p.productId && selectedProductIds.has(p.productId)
+                        }
+                        onChange={() => p.productId && toggleProduct(p.productId)}
+                        disabled={!p.productId}
+                        aria-label={`Chọn ${p.title}`}
+                        className="h-4 w-4 rounded border-slate-300 accent-brand-600"
+                      />
+                    </Td>
                     <Td className="text-center text-xs font-bold text-slate-400">
                       {rank}
                     </Td>
@@ -348,6 +579,11 @@ function ProductsInner() {
                     <Td className="text-right">{formatNumber(p.units)}</Td>
                     <Td className="text-right text-slate-500">
                       {formatJPY(p.cogs)}
+                      {p.missingBasecost && (
+                        <div className="mt-1">
+                          <Badge tone="rose">Thiếu Basecost</Badge>
+                        </div>
+                      )}
                       {p.units > 0 && p.cogs > 0 && (
                         <div className="text-[10px] text-slate-400">
                           ≈ {formatJPY(p.cogs / p.units)}/cái
