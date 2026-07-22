@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Fragment, Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DateRangePicker, DateRange } from "@/components/DateRangePicker";
 import { ProductThumbnail } from "@/components/ProductThumbnail";
@@ -25,6 +25,22 @@ import {
   parseCalendarDate,
 } from "@/lib/dates";
 
+interface ProductVariantRow {
+  externalVariantId: string | null;
+  variantTitle: string | null;
+  sku: string | null;
+  orders: number;
+  orderLines: number;
+  units: number;
+  costedUnits: number;
+  missingOrderLines: number;
+  missingUnits: number;
+  cogs: number;
+  averageUnitCost: number;
+  minUnitCost: number | null;
+  maxUnitCost: number | null;
+}
+
 interface ProductRow {
   productId: string | null;
   storeId: string;
@@ -32,6 +48,12 @@ interface ProductRow {
   image: string | null;
   storefrontUrl: string | null;
   missingBasecost: boolean;
+  variantCount: number;
+  missingVariants: number;
+  missingOrderLines: number;
+  missingUnits: number;
+  costedUnits: number;
+  variants: ProductVariantRow[];
   orders: number;
   units: number;
   revenue: number;
@@ -72,6 +94,16 @@ interface CostSyncResponse {
   ok: boolean;
   updated: number;
   missingCount: number;
+  nextCursor: string | null;
+  hasNext: boolean;
+  error?: string;
+}
+
+interface VariantSyncResponse {
+  ok: boolean;
+  scanned: number;
+  found: number;
+  updatedCosts: number;
   nextCursor: string | null;
   hasNext: boolean;
   error?: string;
@@ -127,6 +159,9 @@ function ProductsInner() {
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(
     new Set()
   );
+  const [expandedProductIds, setExpandedProductIds] = useState<Set<string>>(
+    new Set()
+  );
   const [mediaVersion, setMediaVersion] = useState(0);
 
   useEffect(() => {
@@ -143,6 +178,7 @@ function ProductsInner() {
   // explicit and never affect products the user can no longer see.
   useEffect(() => {
     setSelectedProductIds(new Set());
+    setExpandedProductIds(new Set());
   }, [range, storeId, qDebounced, sort, basecostFilter, pageSize, page]);
 
   useEffect(() => {
@@ -281,8 +317,45 @@ function ProductsInner() {
     setActionMessage("Đang cập nhật Basecost cho các sản phẩm đã chọn…");
     let updated = 0;
     let missing = 0;
+    let scannedVariants = 0;
     try {
       for (const [targetStoreId, productIds] of targets) {
+        // First resolve every current exact variant. This fills size/color/SKU
+        // metadata and all directly available costs without touching snapshots.
+        let variantCursor: string | null = null;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const variantResponse = await fetch("/api/products/variants", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              storeId: targetStoreId,
+              productIds,
+              from: calendarYMD(range.from),
+              to: calendarYMD(range.to),
+              cursor: variantCursor,
+            }),
+          });
+          const variantResult = (await variantResponse
+            .json()
+            .catch(() => ({}))) as VariantSyncResponse;
+          if (!variantResponse.ok || !variantResult.ok) {
+            throw new Error(variantResult.error || `HTTP ${variantResponse.status}`);
+          }
+          scannedVariants += Number(variantResult.scanned) || 0;
+          updated += Number(variantResult.updatedCosts) || 0;
+          setActionMessage(
+            `Đang cập nhật Basecost… đã kiểm tra ${formatNumber(
+              scannedVariants
+            )} variant`
+          );
+          if (!variantResult.hasNext) break;
+          if (!variantResult.nextCursor)
+            throw new Error("Thiếu con trỏ variant tiếp theo");
+          variantCursor = variantResult.nextCursor;
+        }
+
+        // Then repair legacy/deleted variant IDs from the original order line.
         let cursor: string | null = null;
         for (let batch = 0; batch < 500; batch++) {
           const response = await fetch("/api/shopify/costs", {
@@ -314,10 +387,14 @@ function ProductsInner() {
       }
       setActionMessage(
         missing > 0
-          ? `⚠ Đã cập nhật ${formatNumber(updated)} dòng Basecost; còn ${formatNumber(
+          ? `⚠ Đã kiểm tra ${formatNumber(scannedVariants)} variant và cập nhật ${formatNumber(
+              updated
+            )} dòng Basecost; còn ${formatNumber(
               missing
-            )} sản phẩm đã chọn chưa có Cost per item trên Shopify.`
-          : `✓ Đã cập nhật ${formatNumber(updated)} dòng Basecost cho các sản phẩm đã chọn.`
+            )} sản phẩm đã chọn có variant chưa có Cost per item trên Shopify.`
+          : `✓ Đã kiểm tra ${formatNumber(scannedVariants)} variant và cập nhật ${formatNumber(
+              updated
+            )} dòng Basecost cho các sản phẩm đã chọn.`
       );
       setSelectedProductIds(new Set());
       setMediaVersion((version) => version + 1);
@@ -357,6 +434,15 @@ function ProductsInner() {
 
   function toggleProduct(productId: string) {
     setSelectedProductIds((current) => {
+      const next = new Set(current);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
+  }
+
+  function toggleProductDetails(productId: string) {
+    setExpandedProductIds((current) => {
       const next = new Set(current);
       if (next.has(productId)) next.delete(productId);
       else next.add(productId);
@@ -521,9 +607,10 @@ function ProductsInner() {
               {data?.rows.map((p, i) => {
                 const rank = (data.page - 1) * data.pageSize + i + 1;
                 const margin = p.revenue > 0 ? p.grossProfit / p.revenue : 0;
+                const rowKey = p.productId ?? p.title;
                 return (
+                  <Fragment key={rowKey}>
                   <tr
-                    key={p.productId ?? p.title}
                     className={
                       p.productId && selectedProductIds.has(p.productId)
                         ? "bg-brand-50/60 hover:bg-brand-50"
@@ -581,14 +668,26 @@ function ProductsInner() {
                       {formatJPY(p.cogs)}
                       {p.missingBasecost && (
                         <div className="mt-1">
-                          <Badge tone="rose">Thiếu Basecost</Badge>
+                          <Badge tone="rose">
+                            Thiếu {p.missingVariants} variant · {p.missingOrderLines} dòng
+                          </Badge>
                         </div>
                       )}
-                      {p.units > 0 && p.cogs > 0 && (
+                      {p.costedUnits > 0 && p.cogs > 0 && (
                         <div className="text-[10px] text-slate-400">
-                          ≈ {formatJPY(p.cogs / p.units)}/cái
+                          Bình quân phần đã có: {formatJPY(p.cogs / p.costedUnits)}/cái
                         </div>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => p.productId && toggleProductDetails(p.productId)}
+                        disabled={!p.productId || p.variantCount === 0}
+                        className="mt-1 block text-[11px] font-medium text-brand-600 hover:underline disabled:text-slate-300 disabled:no-underline"
+                      >
+                        {p.productId && expandedProductIds.has(p.productId)
+                          ? "Ẩn chi tiết"
+                          : `Xem ${p.variantCount} variant`}
+                      </button>
                     </Td>
                     <Td className="text-right font-semibold text-slate-700">
                       {formatJPY(p.revenue)}
@@ -620,6 +719,14 @@ function ProductsInner() {
                       </div>
                     </Td>
                   </tr>
+                  {p.productId && expandedProductIds.has(p.productId) && (
+                    <tr className="bg-slate-50/80">
+                      <td colSpan={9} className="border-b border-slate-200 px-4 py-4">
+                        <VariantCostDetails product={p} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -686,5 +793,121 @@ function MiniStat({ label, value }: { label: string; value: string }) {
       </div>
       <div className="mt-0.5 text-lg font-bold text-slate-900">{value}</div>
     </Card>
+  );
+}
+
+function VariantCostDetails({ product }: { product: ProductRow }) {
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold text-slate-700">
+            Basecost theo từng variant và dòng order
+          </div>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Mỗi dòng order giữ snapshot Cost per item riêng. Nếu Shopify từng đổi
+            giá vốn, cùng một variant có thể hiển thị một khoảng giá.
+          </p>
+          {product.variants.some((variant) => !variant.variantTitle) && (
+            <p className="mt-1 text-xs text-amber-700">
+              Dữ liệu cũ chưa có tên size/color: tích chọn sản phẩm rồi bấm Cập
+              nhật Basecost để bổ sung tên variant và SKU.
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <Badge tone="blue">
+            Đã có cost {formatNumber(product.costedUnits)}/{formatNumber(product.units)} items
+          </Badge>
+          {product.missingUnits > 0 && (
+            <Badge tone="rose">
+              Thiếu {formatNumber(product.missingUnits)} items · {formatNumber(
+                product.missingOrderLines
+              )} dòng order
+            </Badge>
+          )}
+        </div>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+        <table className="w-full min-w-[760px] text-xs">
+          <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-400">
+            <tr>
+              <th className="px-3 py-2 text-left">Variant (size / color)</th>
+              <th className="px-3 py-2 text-left">SKU</th>
+              <th className="px-3 py-2 text-right">Đơn / dòng</th>
+              <th className="px-3 py-2 text-right">Items</th>
+              <th className="px-3 py-2 text-right">Basecost / item</th>
+              <th className="px-3 py-2 text-right">Tổng Basecost</th>
+              <th className="px-3 py-2 text-right">Trạng thái</th>
+            </tr>
+          </thead>
+          <tbody>
+            {product.variants.map((variant, index) => {
+              const variantId = variant.externalVariantId?.split("/").pop();
+              const label =
+                variant.variantTitle ||
+                (variantId ? `Variant #${variantId}` : "Không xác định variant");
+              const hasRange =
+                variant.minUnitCost !== null &&
+                variant.maxUnitCost !== null &&
+                Math.abs(variant.maxUnitCost - variant.minUnitCost) > 0.0001;
+              return (
+                <tr
+                  key={variant.externalVariantId ?? `${label}-${index}`}
+                  className="border-t border-slate-100"
+                >
+                  <td className="px-3 py-2 font-medium text-slate-700">
+                    {label}
+                    {variantId && variant.variantTitle && (
+                      <div className="text-[10px] font-normal text-slate-400">
+                        ID {variantId}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-slate-500">{variant.sku || "—"}</td>
+                  <td className="px-3 py-2 text-right text-slate-600">
+                    {formatNumber(variant.orders)} / {formatNumber(variant.orderLines)}
+                  </td>
+                  <td className="px-3 py-2 text-right text-slate-600">
+                    {formatNumber(variant.units)}
+                  </td>
+                  <td className="px-3 py-2 text-right text-slate-600">
+                    {variant.costedUnits > 0 ? (
+                      <>
+                        {hasRange
+                          ? `${formatJPY(variant.minUnitCost ?? 0)} – ${formatJPY(
+                              variant.maxUnitCost ?? 0
+                            )}`
+                          : formatJPY(variant.averageUnitCost)}
+                        {hasRange && (
+                          <div className="text-[10px] text-slate-400">
+                            Bình quân {formatJPY(variant.averageUnitCost)}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right font-medium text-slate-700">
+                    {formatJPY(variant.cogs)}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {variant.missingOrderLines > 0 ? (
+                      <Badge tone="rose">
+                        Thiếu {formatNumber(variant.missingOrderLines)} dòng ·{" "}
+                        {formatNumber(variant.missingUnits)} items
+                      </Badge>
+                    ) : (
+                      <Badge tone="green">Đã đủ</Badge>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

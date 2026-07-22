@@ -16,6 +16,21 @@ export const dynamic = "force-dynamic";
 //   RULE          → order-level % / per-order COGS rules spread over the order's
 //                   lines by value share; else product.baseCost / per-unit rule.
 
+type VariantAgg = {
+  externalVariantId: string | null;
+  variantTitle: string | null;
+  sku: string | null;
+  orderIds: Set<string>;
+  orderLines: number;
+  units: number;
+  costedUnits: number;
+  missingOrderLines: number;
+  missingUnits: number;
+  cogs: number;
+  minUnitCost: number | null;
+  maxUnitCost: number | null;
+};
+
 type Agg = {
   productId: string | null;
   storeId: string;
@@ -27,6 +42,7 @@ type Agg = {
   units: number;
   revenue: number;
   cogs: number;
+  variants: Map<string, VariantAgg>;
   channels: Map<string, number>; // channel → distinct orders
 };
 
@@ -61,6 +77,7 @@ export async function GET(req: NextRequest) {
         ...storeFilter,
       },
       select: {
+        id: true,
         storeId: true,
         channel: true,
         store: {
@@ -69,6 +86,9 @@ export async function GET(req: NextRequest) {
         lineItems: {
           select: {
             productId: true,
+            externalVariantId: true,
+            variantTitle: true,
+            sku: true,
             title: true,
             image: true,
             quantity: true,
@@ -161,6 +181,7 @@ export async function GET(req: NextRequest) {
           units: 0,
           revenue: 0,
           cogs: 0,
+          variants: new Map(),
           channels: new Map(),
         } as Agg);
       cur.units += li.quantity;
@@ -169,6 +190,51 @@ export async function GET(req: NextRequest) {
       if (!cur.image && img) cur.image = img;
       if (!cur.storefrontUrl && storefrontUrl) cur.storefrontUrl = storefrontUrl;
       if (missingBasecost) cur.missingBasecost = true;
+
+      const variantKey = li.externalVariantId ?? `no-variant:${li.variantTitle ?? li.title}`;
+      const variant =
+        cur.variants.get(variantKey) ??
+        ({
+          externalVariantId: li.externalVariantId,
+          variantTitle: li.variantTitle,
+          sku: li.sku,
+          orderIds: new Set(),
+          orderLines: 0,
+          units: 0,
+          costedUnits: 0,
+          missingOrderLines: 0,
+          missingUnits: 0,
+          cogs: 0,
+          minUnitCost: null,
+          maxUnitCost: null,
+        } as VariantAgg);
+      variant.orderIds.add(o.id);
+      variant.orderLines += 1;
+      variant.units += li.quantity;
+      variant.cogs += cogs;
+      if (!variant.variantTitle && li.variantTitle)
+        variant.variantTitle = li.variantTitle;
+      if (!variant.sku && li.sku) variant.sku = li.sku;
+      if (missingBasecost) {
+        variant.missingOrderLines += 1;
+        variant.missingUnits += li.quantity;
+      } else {
+        const unitCost = useShopifyCost
+          ? li.unitCost
+          : li.quantity > 0
+          ? cogs / li.quantity
+          : 0;
+        variant.costedUnits += li.quantity;
+        variant.minUnitCost =
+          variant.minUnitCost === null
+            ? unitCost
+            : Math.min(variant.minUnitCost, unitCost);
+        variant.maxUnitCost =
+          variant.maxUnitCost === null
+            ? unitCost
+            : Math.max(variant.maxUnitCost, unitCost);
+      }
+      cur.variants.set(variantKey, variant);
       // Count each order once per product (an order may repeat a product on
       // several lines — variants).
       if (!seenThisOrder.has(key)) {
@@ -210,22 +276,66 @@ export async function GET(req: NextRequest) {
   const safePage = Math.min(page, totalPages);
   const pageRows = rows
     .slice((safePage - 1) * pageSize, safePage * pageSize)
-    .map((r) => ({
-      productId: r.productId,
-      storeId: r.storeId,
-      title: r.title,
-      image: r.image,
-      storefrontUrl: r.storefrontUrl,
-      missingBasecost: r.missingBasecost,
-      orders: r.orders,
-      units: r.units,
-      revenue: r.revenue,
-      cogs: r.cogs,
-      grossProfit: r.revenue - r.cogs,
-      channels: Array.from(r.channels.entries())
-        .map(([channel, orders]) => ({ channel, orders }))
-        .sort((a, b) => b.orders - a.orders),
-    }));
+    .map((r) => {
+      const variants = Array.from(r.variants.values())
+        .map((variant) => ({
+          externalVariantId: variant.externalVariantId,
+          variantTitle: variant.variantTitle,
+          sku: variant.sku,
+          orders: variant.orderIds.size,
+          orderLines: variant.orderLines,
+          units: variant.units,
+          costedUnits: variant.costedUnits,
+          missingOrderLines: variant.missingOrderLines,
+          missingUnits: variant.missingUnits,
+          cogs: variant.cogs,
+          averageUnitCost:
+            variant.costedUnits > 0
+              ? variant.cogs / variant.costedUnits
+              : 0,
+          minUnitCost: variant.minUnitCost,
+          maxUnitCost: variant.maxUnitCost,
+        }))
+        .sort(
+          (a, b) =>
+            Number(b.missingOrderLines > 0) - Number(a.missingOrderLines > 0) ||
+            (a.variantTitle ?? a.externalVariantId ?? "").localeCompare(
+              b.variantTitle ?? b.externalVariantId ?? ""
+            )
+        );
+      return {
+        productId: r.productId,
+        storeId: r.storeId,
+        title: r.title,
+        image: r.image,
+        storefrontUrl: r.storefrontUrl,
+        missingBasecost: r.missingBasecost,
+        variantCount: variants.length,
+        missingVariants: variants.filter((variant) => variant.missingOrderLines > 0)
+          .length,
+        missingOrderLines: variants.reduce(
+          (sum, variant) => sum + variant.missingOrderLines,
+          0
+        ),
+        missingUnits: variants.reduce(
+          (sum, variant) => sum + variant.missingUnits,
+          0
+        ),
+        costedUnits: variants.reduce(
+          (sum, variant) => sum + variant.costedUnits,
+          0
+        ),
+        variants,
+        orders: r.orders,
+        units: r.units,
+        revenue: r.revenue,
+        cogs: r.cogs,
+        grossProfit: r.revenue - r.cogs,
+        channels: Array.from(r.channels.entries())
+          .map(([channel, orders]) => ({ channel, orders }))
+          .sort((a, b) => b.orders - a.orders),
+      };
+    });
 
   return NextResponse.json({
     timezone,

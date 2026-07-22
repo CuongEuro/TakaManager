@@ -133,6 +133,8 @@ test("manual order sync uses a bounded page without inventory cost", { concurren
     assert.match(body.query, /orders\(first: 10/);
     assert.doesNotMatch(body.query, /unitCost/);
     assert.match(body.query, /\bhandle\b/);
+    assert.match(body.query, /variantTitle/);
+    assert.match(body.query, /\bsku\b/);
     return new Response(
       JSON.stringify({
         data: {
@@ -171,6 +173,8 @@ test("order webhook keeps exact Shopify line and variant IDs", () => {
         id: 101,
         product_id: 202,
         variant_id: 303,
+        variant_title: "Cotton / S / White",
+        sku: "CAT-S-W",
         title: "Shirt",
         quantity: 2,
         price: "1200",
@@ -181,6 +185,8 @@ test("order webhook keeps exact Shopify line and variant IDs", () => {
 
   assert.equal(order.lineItems[0].externalLineItemId, "gid://shopify/LineItem/101");
   assert.equal(order.lineItems[0].externalVariantId, "gid://shopify/ProductVariant/303");
+  assert.equal(order.lineItems[0].variantTitle, "Cotton / S / White");
+  assert.equal(order.lineItems[0].sku, "CAT-S-W");
   assert.equal(order.lineItems[1].externalProductId, null);
   assert.equal(order.lineItems[1].externalVariantId, null);
   assert.equal(order.lineItems[0].handle, null);
@@ -205,6 +211,8 @@ test("fetches cost for the exact variant ID", { concurrency: false }, async () =
           nodes: [
             {
               id: variantId,
+              title: "Cotton / S / White",
+              sku: "CAT-S-W",
               inventoryItem: {
                 id: "gid://shopify/InventoryItem/456",
                 unitCost: { amount: "725.5" },
@@ -230,6 +238,8 @@ test("fetches cost for the exact variant ID", { concurrency: false }, async () =
     assert.deepEqual(costs.get(variantId), {
       inventoryItemId: "gid://shopify/InventoryItem/456",
       unitCost: 725.5,
+      variantTitle: "Cotton / S / White",
+      sku: "CAT-S-W",
       productId: "gid://shopify/Product/202",
       productImage: "https://cdn.shopify.com/cat.jpg",
       productHandle: "cat-shirt",

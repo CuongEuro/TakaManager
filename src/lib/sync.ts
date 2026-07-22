@@ -145,6 +145,8 @@ async function upsertOrders(
             externalLineItemId: true,
             externalVariantId: true,
             inventoryItemId: true,
+            variantTitle: true,
+            sku: true,
             title: true,
             image: true,
             price: true,
@@ -183,6 +185,8 @@ async function upsertOrders(
         externalLineItemId: li.externalLineItemId ?? old?.externalLineItemId ?? null,
         externalVariantId: li.externalVariantId ?? old?.externalVariantId ?? null,
         inventoryItemId: li.inventoryItemId ?? old?.inventoryItemId ?? null,
+        variantTitle: li.variantTitle ?? old?.variantTitle ?? null,
+        sku: li.sku ?? old?.sku ?? null,
         title: li.title,
         image: li.image ?? old?.image ?? null,
         quantity: li.quantity,
@@ -273,6 +277,134 @@ export interface ProductMediaPageResult {
   nextCursor: string | null;
   hasNext: boolean;
   errors: string[];
+}
+
+export interface ProductVariantPageResult {
+  ok: boolean;
+  scanned: number;
+  found: number;
+  updatedCosts: number;
+  nextCursor: string | null;
+  hasNext: boolean;
+  error?: string;
+}
+
+/** Refresh one bounded page of exact variants for selected products. Metadata
+ * is updated for every matching order line; Cost per item only fills zero-cost
+ * rows so historical positive snapshots are never overwritten. */
+export async function refreshProductVariantsPage(
+  organizationId: string,
+  opts: {
+    storeId: string;
+    productIds: string[];
+    fromYMD: string;
+    toYMD: string;
+    cursor?: string | null;
+    limit?: number;
+  }
+): Promise<ProductVariantPageResult> {
+  const { creds } = await storeCreds(opts.storeId, organizationId);
+  if (!creds) {
+    return {
+      ok: false,
+      scanned: 0,
+      found: 0,
+      updatedCosts: 0,
+      nextCursor: null,
+      hasNext: false,
+      error: "Thiếu Shopify domain hoặc khóa kết nối.",
+    };
+  }
+  const productIds = [...new Set(opts.productIds.filter(Boolean))];
+  if (productIds.length === 0) {
+    return {
+      ok: true,
+      scanned: 0,
+      found: 0,
+      updatedCosts: 0,
+      nextCursor: null,
+      hasNext: false,
+    };
+  }
+
+  const range = customRange(opts.fromYMD, opts.toYMD, DEFAULT_TZ);
+  const dateWindow = { gte: range.start, lt: range.end };
+  const limit = Math.min(100, Math.max(10, opts.limit ?? 100));
+  const rows = await prisma.orderLineItem.findMany({
+    where: {
+      productId: { in: productIds },
+      externalVariantId: {
+        not: null,
+        ...(opts.cursor ? { gt: opts.cursor } : {}),
+      },
+      order: {
+        organizationId,
+        storeId: opts.storeId,
+        date: dateWindow,
+      },
+    },
+    distinct: ["externalVariantId"],
+    orderBy: { externalVariantId: "asc" },
+    take: limit + 1,
+    select: { externalVariantId: true },
+  });
+  const page = rows.slice(0, limit);
+  const hasNext = rows.length > limit;
+  const nextCursor = hasNext
+    ? page[page.length - 1]?.externalVariantId ?? null
+    : null;
+  const variants = await fetchVariantCosts(
+    creds,
+    page
+      .map((row) => row.externalVariantId)
+      .filter((id): id is string => !!id)
+  );
+  const details = Array.from(variants.entries());
+
+  if (details.length > 0) {
+    await prisma.$transaction(
+      details.map(([variantId, detail]) =>
+        prisma.orderLineItem.updateMany({
+          where: {
+            productId: { in: productIds },
+            externalVariantId: variantId,
+            order: { organizationId, storeId: opts.storeId, date: dateWindow },
+          },
+          data: {
+            inventoryItemId: detail.inventoryItemId,
+            ...(detail.variantTitle
+              ? { variantTitle: detail.variantTitle }
+              : {}),
+            ...(detail.sku ? { sku: detail.sku } : {}),
+          },
+        })
+      )
+    );
+  }
+  const costUpdates = details
+    .filter(([, detail]) => detail.unitCost > 0)
+    .map(([variantId, detail]) =>
+      prisma.orderLineItem.updateMany({
+        where: {
+          productId: { in: productIds },
+          externalVariantId: variantId,
+          unitCost: { lte: 0 },
+          order: { organizationId, storeId: opts.storeId, date: dateWindow },
+        },
+        data: { unitCost: detail.unitCost },
+      })
+    );
+  const costResults =
+    costUpdates.length > 0 ? await prisma.$transaction(costUpdates) : [];
+
+  return {
+    ok: true,
+    scanned: page.length,
+    found: details.length,
+    updatedCosts: costResults.reduce((sum, result) => sum + result.count, 0),
+    nextCursor,
+    hasNext,
+  };
 }
 
 /** Refresh one bounded page of Shopify product images + handles. The browser
@@ -431,6 +563,8 @@ export async function ingestWebhookOrder(
                   externalProductId: line.externalProductId ?? cost.productId,
                   inventoryItemId: cost.inventoryItemId,
                   unitCost: cost.unitCost,
+                  variantTitle: line.variantTitle ?? cost.variantTitle,
+                  sku: line.sku ?? cost.sku,
                   image: line.image ?? cost.productImage,
                   handle: line.handle ?? cost.productHandle,
                 }
@@ -926,6 +1060,8 @@ export async function syncStoreCosts(
         },
         data: {
           inventoryItemId: cost.inventoryItemId,
+          ...(cost.variantTitle ? { variantTitle: cost.variantTitle } : {}),
+          ...(cost.sku ? { sku: cost.sku } : {}),
           ...(positive ? { unitCost: cost.unitCost } : {}),
         },
       });
@@ -1030,6 +1166,8 @@ export async function syncStoreCosts(
           externalLineItemId: remote.externalLineItemId,
           externalVariantId: variantId,
           inventoryItemId,
+          variantTitle: remote.variantTitle,
+          sku: remote.sku,
           ...(unitCost > 0 ? { unitCost } : {}),
         },
       });

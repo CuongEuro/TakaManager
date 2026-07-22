@@ -24,6 +24,8 @@ export interface ShopifyOrderLineNorm {
   externalLineItemId: string | null;
   externalVariantId: string | null;
   inventoryItemId: string | null;
+  variantTitle: string | null;
+  sku: string | null;
   title: string;
   image: string | null;
   handle: string | null;
@@ -237,6 +239,8 @@ query Orders($cursor: String, $query: String) {
         nodes {
           id
           title
+          variantTitle
+          sku
           quantity
           originalUnitPriceSet { shopMoney { amount } }
           product { id handle featuredImage { url } }
@@ -276,6 +280,8 @@ interface OrdersResp {
         nodes: {
           id: string;
           title: string;
+          variantTitle: string | null;
+          sku: string | null;
           quantity: number;
           originalUnitPriceSet: { shopMoney: { amount: string } } | null;
           product: {
@@ -354,6 +360,8 @@ export function normalizeOrder(
       externalLineItemId: li.id,
       externalVariantId: li.variant?.id ?? null,
       inventoryItemId: li.variant?.inventoryItem?.id ?? null,
+      variantTitle: li.variantTitle ?? null,
+      sku: li.sku ?? null,
       title: li.title,
       image: li.product?.featuredImage?.url ?? null,
       handle: li.product?.handle ?? null,
@@ -437,6 +445,8 @@ query VariantCosts($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on ProductVariant {
       id
+      title
+      sku
       inventoryItem { id unitCost { amount } }
       product { id handle featuredImage { url } }
     }
@@ -449,6 +459,8 @@ export interface ShopifyVariantCost {
 }
 
 export interface ShopifyVariantDetails extends ShopifyVariantCost {
+  variantTitle: string | null;
+  sku: string | null;
   productId: string | null;
   productImage: string | null;
   productHandle: string | null;
@@ -470,6 +482,8 @@ export async function fetchVariantCosts(
       nodes: (
         | {
             id: string;
+            title: string;
+            sku: string | null;
             inventoryItem: {
               id: string;
               unitCost: { amount: string } | null;
@@ -488,6 +502,8 @@ export async function fetchVariantCosts(
       out.set(node.id, {
         inventoryItemId: node.inventoryItem?.id ?? null,
         unitCost: num(node.inventoryItem?.unitCost?.amount),
+        variantTitle: node.title || null,
+        sku: node.sku || null,
         productId: node.product?.id ?? null,
         productImage: node.product?.featuredImage?.url ?? null,
         productHandle: node.product?.handle ?? null,
@@ -1112,6 +1128,8 @@ interface WebhookOrderPayload {
     price?: string;
     product_id?: number | string | null;
     variant_id?: number | string | null;
+    variant_title?: string | null;
+    sku?: string | null;
   }[];
 }
 
@@ -1132,6 +1150,8 @@ export function normalizeWebhookOrder(p: WebhookOrderPayload): ShopifyOrderNorm 
       externalVariantId:
         li.variant_id != null ? `gid://shopify/ProductVariant/${li.variant_id}` : null,
       inventoryItemId: null,
+      variantTitle: li.variant_title ?? null,
+      sku: li.sku ?? null,
       title: li.title,
       image: null, // webhook payload has no product image; a later sync fills it
       handle: null, // enriched from the exact variant lookup before ingestion

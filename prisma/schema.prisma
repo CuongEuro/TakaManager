@@ -343,6 +343,8 @@ model OrderLineItem {
   externalLineItemId String? // Shopify LineItem GID; stable key across order updates
   externalVariantId  String? // exact Shopify ProductVariant GID used for Cost per item
   inventoryItemId    String? // Shopify InventoryItem GID used by inventory cost webhooks
+  variantTitle       String? // size/color/options snapshot from order or exact variant
+  sku                String? // variant SKU snapshot
   title              String
   image              String?
   quantity           Int      @default(1)
