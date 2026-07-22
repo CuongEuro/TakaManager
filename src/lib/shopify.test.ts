@@ -46,6 +46,13 @@ test("resolves a recreated variant by SKU or exact historical title", () => {
         sku: null,
         unitCost: 462,
       },
+      {
+        externalVariantId: "gid://shopify/ProductVariant/4",
+        inventoryItemId: "gid://shopify/InventoryItem/4",
+        title: "Tシャツ / 2XL / グレー",
+        sku: null,
+        unitCost: 737,
+      },
     ],
   };
 
@@ -69,6 +76,13 @@ test("resolves a recreated variant by SKU or exact historical title", () => {
       catalog
     )?.externalVariantId,
     "gid://shopify/ProductVariant/3"
+  );
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "2XL / グレー / Tシャツ" },
+      catalog
+    )?.externalVariantId,
+    "gid://shopify/ProductVariant/4"
   );
 });
 
@@ -150,6 +164,35 @@ test("does not guess a cost when historical variant cannot be identified", () =>
             title: "Cotton / S / White",
             sku: null,
             unitCost: 436,
+          },
+        ],
+      }
+    ),
+    null
+  );
+});
+
+test("does not guess when reordered option values match multiple variants", () => {
+  assert.equal(
+    resolveCatalogVariantCost(
+      { sku: null, variantTitle: "2XL / グレー / Tシャツ" },
+      {
+        externalProductId: "gid://shopify/Product/202",
+        title: "Cat shirt",
+        variants: [
+          {
+            externalVariantId: "gid://shopify/ProductVariant/1",
+            inventoryItemId: "gid://shopify/InventoryItem/1",
+            title: "Tシャツ / 2XL / グレー",
+            sku: null,
+            unitCost: 737,
+          },
+          {
+            externalVariantId: "gid://shopify/ProductVariant/2",
+            inventoryItemId: "gid://shopify/InventoryItem/2",
+            title: "グレー / Tシャツ / 2XL",
+            sku: null,
+            unitCost: 737,
           },
         ],
       }

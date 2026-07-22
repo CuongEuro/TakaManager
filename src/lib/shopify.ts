@@ -682,6 +682,7 @@ function normalizedVariantTitle(value: string | null | undefined): string {
       return [bilingualPair[1].trim(), bilingualPair[2].trim()].sort().join("=");
     })
     .filter(Boolean)
+    .sort()
     .join("/");
 }
 
