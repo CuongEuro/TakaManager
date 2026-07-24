@@ -360,7 +360,8 @@ export default function AdAccountsPage() {
     let rows = 0;
     let ok = true;
     let error: string | undefined;
-    const chunks = buildChunks(from, to, deepAll ? 1 : 14);
+    const maxDays = deepAll ? 1 : a.platform === "TWITTER" ? 7 : 14;
+    const chunks = buildChunks(from, to, maxDays);
     for (let i = 0; i < chunks.length; i++) {
       const c = chunks[i];
       try {
@@ -395,7 +396,8 @@ export default function AdAccountsPage() {
     setBusy(a.id + "sync");
     setMsg(null);
     setSyncResults([]);
-    const total = buildChunks(range.from, range.to, deepAll ? 1 : 14).length;
+    const maxDays = deepAll ? 1 : a.platform === "TWITTER" ? 7 : 14;
+    const total = buildChunks(range.from, range.to, maxDays).length;
     let done = 0;
     setSyncProg({ done: 0, total });
     const res = await syncAccountRange(a, range.from, range.to, () => {
@@ -426,8 +428,10 @@ export default function AdAccountsPage() {
     setBusy("ALL");
     setMsg(null);
     setSyncResults([]);
-    const chunksPer = buildChunks(range.from, range.to, deepAll ? 1 : 14).length;
-    const total = targets.length * chunksPer;
+    const total = targets.reduce((sum, a) => {
+      const maxDays = deepAll ? 1 : a.platform === "TWITTER" ? 7 : 14;
+      return sum + buildChunks(range.from, range.to, maxDays).length;
+    }, 0);
     let done = 0;
     setSyncProg({ done: 0, total });
     const collected: SyncResult[] = [];

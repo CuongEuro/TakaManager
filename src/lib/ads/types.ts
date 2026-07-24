@@ -62,6 +62,8 @@ export function normalizeAdStatus(s: unknown): string | null {
 export interface AdAccountCreds {
   platform: string; // FACEBOOK | GOOGLE | TWITTER
   externalId: string;
+  // Provider account timezone, loaded lazily during an X Ads sync.
+  accountTimeZone?: string | null;
   accessToken?: string | null;
   accessSecret?: string | null;
   apiKey?: string | null;

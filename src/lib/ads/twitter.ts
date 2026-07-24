@@ -14,8 +14,24 @@ import {
   num,
   ymd,
 } from "./types";
+import { customRange } from "@/lib/dates";
 
-const API = "https://ads-api.twitter.com/12";
+export const X_ADS_API_BASE = "https://ads-api.x.com/12";
+
+function requireTwitterCredentials(creds: AdAccountCreds): void {
+  const missing = [
+    ["Ads Account ID", creds.externalId],
+    ["API Key", creds.apiKey],
+    ["API Secret", creds.apiSecret],
+    ["Access Token", creds.accessToken],
+    ["Access Token Secret", creds.accessSecret],
+  ]
+    .filter(([, value]) => !value?.trim())
+    .map(([label]) => label);
+  if (missing.length > 0) {
+    throw new Error(`X Ads: thiếu ${missing.join(", ")}`);
+  }
+}
 
 /** RFC 3986 percent-encoding (stricter than encodeURIComponent). */
 export function percentEncode(str: string): string {
@@ -82,18 +98,87 @@ async function signedGet(
   path: string,
   query: Record<string, string>
 ) {
-  const url = `${API}${path}`;
+  requireTwitterCredentials(creds);
+  const url = `${X_ADS_API_BASE}${path}`;
   const auth = oauthHeader(creds, "GET", url, query);
   const qs = new URLSearchParams(query).toString();
   const res = await fetch(`${url}?${qs}`, { headers: { Authorization: auth } });
   const text = await res.text();
-  if (!res.ok) throw new Error(`X Ads HTTP ${res.status}: ${text.slice(0, 200)}`);
+  if (!res.ok) {
+    let detail = text.slice(0, 300);
+    try {
+      const json = JSON.parse(text);
+      detail =
+        json?.errors?.map((e: { message?: string }) => e.message).filter(Boolean).join("; ") ||
+        json?.error?.message ||
+        detail;
+    } catch {
+      // Keep the response text when X did not return JSON.
+    }
+    throw new Error(`X Ads HTTP ${res.status}: ${detail}`);
+  }
   return JSON.parse(text);
 }
 
 export async function testTwitter(creds: AdAccountCreds): Promise<string> {
   const json = await signedGet(creds, `/accounts/${creds.externalId}`, {});
   return json?.data?.name ?? `Account ${creds.externalId}`;
+}
+
+async function accountTimeZone(creds: AdAccountCreds): Promise<string> {
+  if (creds.accountTimeZone) return creds.accountTimeZone;
+  const json = await signedGet(creds, `/accounts/${creds.externalId}`, {});
+  const timeZone = String(json?.data?.timezone ?? "").trim();
+  if (!timeZone) throw new Error("X Ads: tài khoản không trả về múi giờ");
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date());
+  } catch {
+    throw new Error(`X Ads: múi giờ tài khoản không hợp lệ (${timeZone})`);
+  }
+  creds.accountTimeZone = timeZone;
+  return timeZone;
+}
+
+export interface TwitterDayWindow {
+  startTime: string;
+  endTime: string;
+  dates: string[];
+}
+
+/**
+ * X DAY analytics requires boundaries at midnight in the ad account timezone.
+ * The UI's `until` day is inclusive; X's end_time is exclusive.
+ */
+export function twitterDayWindow(
+  since: Date,
+  until: Date,
+  timeZone: string
+): TwitterDayWindow {
+  const sinceDay = ymd(since);
+  const untilDay = ymd(until);
+  const fromDay = sinceDay <= untilDay ? sinceDay : untilDay;
+  const toDay = sinceDay <= untilDay ? untilDay : sinceDay;
+  const range = customRange(fromDay, toDay, timeZone);
+  const cursor = new Date(`${fromDay}T00:00:00Z`);
+  const last = new Date(`${toDay}T00:00:00Z`);
+  const dates: string[] = [];
+  while (cursor.getTime() <= last.getTime()) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return {
+    startTime: range.start.toISOString().replace(".000Z", "Z"),
+    endTime: range.end.toISOString().replace(".000Z", "Z"),
+    dates,
+  };
+}
+
+async function twitterWindow(
+  creds: AdAccountCreds,
+  since: Date,
+  until: Date
+): Promise<TwitterDayWindow> {
+  return twitterDayWindow(since, until, await accountTimeZone(creds));
 }
 
 interface Campaign {
@@ -171,17 +256,12 @@ export async function fetchTwitterInsights(
   since: Date,
   until: Date = new Date()
 ): Promise<AdInsight[]> {
-  const campaigns = await fetchCampaigns(creds);
+  const [campaigns, window] = await Promise.all([
+    fetchCampaigns(creds),
+    twitterWindow(creds, since, until),
+  ]);
   if (campaigns.length === 0) return [];
 
-  const start = new Date(since);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(until);
-  end.setHours(0, 0, 0, 0);
-  const dayCount = Math.max(
-    1,
-    Math.round((end.getTime() - start.getTime()) / 86400000)
-  );
   const byId = new Map(campaigns.map((c) => [c.id, c.name]));
   const statusById = new Map(campaigns.map((c) => [c.id, c.status]));
   const out: AdInsight[] = [];
@@ -195,8 +275,8 @@ export async function fetchTwitterInsights(
       metric_groups: "BILLING,ENGAGEMENT,WEB_CONVERSION",
       granularity: "DAY",
       placement: "ALL_ON_TWITTER",
-      start_time: `${ymd(start)}T00:00:00Z`,
-      end_time: `${ymd(end)}T00:00:00Z`,
+      start_time: window.startTime,
+      end_time: window.endTime,
     });
 
     for (const row of json.data ?? []) {
@@ -206,9 +286,7 @@ export async function fetchTwitterInsights(
       const imprArr: (number | null)[] = metrics.impressions ?? [];
       const clickArr: (number | null)[] = metrics.clicks ?? [];
       const purchases: ConvMetric = metrics.conversion_purchases;
-      for (let d = 0; d < dayCount; d++) {
-        const day = new Date(start);
-        day.setDate(start.getDate() + d);
+      for (let d = 0; d < window.dates.length; d++) {
         const spend = num(spendArr[d]) / 1_000_000;
         const impressions = num(imprArr[d]);
         const clicks = num(clickArr[d]);
@@ -218,7 +296,7 @@ export async function fetchTwitterInsights(
         if (spend === 0 && impressions === 0 && clicks === 0 && conversions === 0)
           continue;
         out.push({
-          date: ymd(day),
+          date: window.dates[d],
           campaignExternalId: row.id ?? null,
           campaignName: byId.get(row.id) ?? null,
           campaignStatus: statusById.get(row.id) ?? null,
@@ -267,22 +345,15 @@ export async function fetchTwitterAdsets(
   since: Date,
   until: Date = new Date()
 ): Promise<AdsetInsight[]> {
-  const [campaigns, lineItems] = await Promise.all([
+  const [campaigns, lineItems, window] = await Promise.all([
     fetchCampaigns(creds),
     fetchLineItems(creds),
+    twitterWindow(creds, since, until),
   ]);
   if (lineItems.length === 0) return [];
   const campName = new Map(campaigns.map((c) => [c.id, c.name]));
   const campStatus = new Map(campaigns.map((c) => [c.id, c.status]));
 
-  const start = new Date(since);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(until);
-  end.setHours(0, 0, 0, 0);
-  const dayCount = Math.max(
-    1,
-    Math.round((end.getTime() - start.getTime()) / 86400000)
-  );
   const liById = new Map(lineItems.map((l) => [l.id, l]));
   const out: AdsetInsight[] = [];
 
@@ -294,8 +365,8 @@ export async function fetchTwitterAdsets(
       metric_groups: "BILLING,ENGAGEMENT,WEB_CONVERSION",
       granularity: "DAY",
       placement: "ALL_ON_TWITTER",
-      start_time: `${ymd(start)}T00:00:00Z`,
-      end_time: `${ymd(end)}T00:00:00Z`,
+      start_time: window.startTime,
+      end_time: window.endTime,
     });
 
     for (const row of json.data ?? []) {
@@ -306,9 +377,7 @@ export async function fetchTwitterAdsets(
       const imprArr: (number | null)[] = m.impressions ?? [];
       const clickArr: (number | null)[] = m.clicks ?? [];
       const purchases: ConvMetric = m.conversion_purchases;
-      for (let d = 0; d < dayCount; d++) {
-        const day = new Date(start);
-        day.setDate(start.getDate() + d);
+      for (let d = 0; d < window.dates.length; d++) {
         const spend = num(spendArr[d]) / 1_000_000;
         const impressions = num(imprArr[d]);
         const clicks = num(clickArr[d]);
@@ -323,7 +392,7 @@ export async function fetchTwitterAdsets(
           adsetExternalId: li.id,
           adsetName: li.name,
           status: normalizeAdStatus(li.status),
-          date: ymd(day),
+          date: window.dates[d],
           spend,
           impressions,
           clicks,
@@ -372,17 +441,12 @@ export async function fetchTwitterAds(
   since: Date,
   until: Date = new Date()
 ): Promise<AdCreativeInsight[]> {
-  const promoted = await fetchPromotedTweets(creds);
+  const [promoted, window] = await Promise.all([
+    fetchPromotedTweets(creds),
+    twitterWindow(creds, since, until),
+  ]);
   if (promoted.length === 0) return [];
 
-  const start = new Date(since);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(until);
-  end.setHours(0, 0, 0, 0);
-  const dayCount = Math.max(
-    1,
-    Math.round((end.getTime() - start.getTime()) / 86400000)
-  );
   const byId = new Map(promoted.map((p) => [p.id, p]));
   const out: AdCreativeInsight[] = [];
 
@@ -394,8 +458,8 @@ export async function fetchTwitterAds(
       metric_groups: "BILLING,ENGAGEMENT,WEB_CONVERSION",
       granularity: "DAY",
       placement: "ALL_ON_TWITTER",
-      start_time: `${ymd(start)}T00:00:00Z`,
-      end_time: `${ymd(end)}T00:00:00Z`,
+      start_time: window.startTime,
+      end_time: window.endTime,
     });
 
     for (const row of json.data ?? []) {
@@ -406,9 +470,7 @@ export async function fetchTwitterAds(
       const imprArr: (number | null)[] = m.impressions ?? [];
       const clickArr: (number | null)[] = m.clicks ?? [];
       const purchases: ConvMetric = m.conversion_purchases;
-      for (let d = 0; d < dayCount; d++) {
-        const day = new Date(start);
-        day.setDate(start.getDate() + d);
+      for (let d = 0; d < window.dates.length; d++) {
         const spend = num(spendArr[d]) / 1_000_000;
         const impressions = num(imprArr[d]);
         const clicks = num(clickArr[d]);
@@ -421,7 +483,7 @@ export async function fetchTwitterAds(
           adExternalId: pt.id,
           adName: pt.tweetId ? `Tweet ${pt.tweetId}` : pt.id,
           status: null,
-          date: ymd(day),
+          date: window.dates[d],
           spend,
           impressions,
           clicks,
