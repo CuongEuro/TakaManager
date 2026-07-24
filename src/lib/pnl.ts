@@ -76,6 +76,8 @@ export interface StoreRow {
   storeId: string;
   storeName: string;
   revenue: number;
+  orders: number;
+  aov: number;
   adSpend: number;
   netProfit: number;
   netMargin: number;
@@ -916,6 +918,8 @@ function buildStoreBreakdown(
       storeId: s.id,
       storeName: s.name,
       revenue,
+      orders: sOrders.length,
+      aov: sOrders.length > 0 ? revenue / sOrders.length : 0,
       adSpend,
       netProfit,
       netMargin: revenue > 0 ? netProfit / revenue : 0,

@@ -636,11 +636,13 @@ export default function DashboardPage() {
                 <EmptyState message="Chưa có store nào có dữ liệu." />
               ) : (
                 <div className="overflow-x-auto">
-                <table className="w-full min-w-[440px] text-sm">
+                <table className="w-full min-w-[600px] text-sm">
                   <thead>
                     <tr className="text-xs uppercase text-slate-400">
                       <th className="py-1 text-left">Store</th>
                       <th className="py-1 text-right">Doanh thu</th>
+                      <th className="py-1 text-right">Order</th>
+                      <th className="py-1 text-right">AOV</th>
                       <th className="py-1 text-right">Ads</th>
                       <th className="py-1 text-right">LN ròng</th>
                       <th className="py-1 text-right">Biên</th>
@@ -653,6 +655,12 @@ export default function DashboardPage() {
                           {row.storeName}
                         </td>
                         <td className="py-1.5 text-right">{formatJPY(row.revenue)}</td>
+                        <td className="py-1.5 text-right tabular-nums">
+                          {formatNumber(row.orders)}
+                        </td>
+                        <td className="py-1.5 text-right tabular-nums">
+                          {row.orders > 0 ? formatJPY(row.aov) : "—"}
+                        </td>
                         <td className="py-1.5 text-right text-rose-500">
                           {formatJPY(row.adSpend)}
                         </td>
